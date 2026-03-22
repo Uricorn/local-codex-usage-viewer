@@ -1,0 +1,1028 @@
+#!/usr/bin/env python3
+"""Scan local Codex session logs and render an offline usage dashboard.
+
+Parsing and pricing heuristics are inspired by CodexBar's local usage scanner:
+https://github.com/steipete/CodexBar
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+import time
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable, Iterable
+
+
+VERSION = "0.1.0"
+
+PRICING = {
+    "gpt-5": (1.25e-6, 1e-5, 1.25e-7),
+    "gpt-5-codex": (1.25e-6, 1e-5, 1.25e-7),
+    "gpt-5-mini": (2.5e-7, 2e-6, 2.5e-8),
+    "gpt-5-nano": (5e-8, 4e-7, 5e-9),
+    "gpt-5-pro": (1.5e-5, 1.2e-4, None),
+    "gpt-5.1": (1.25e-6, 1e-5, 1.25e-7),
+    "gpt-5.1-codex": (1.25e-6, 1e-5, 1.25e-7),
+    "gpt-5.1-codex-max": (1.25e-6, 1e-5, 1.25e-7),
+    "gpt-5.1-codex-mini": (2.5e-7, 2e-6, 2.5e-8),
+    "gpt-5.2": (1.75e-6, 1.4e-5, 1.75e-7),
+    "gpt-5.2-codex": (1.75e-6, 1.4e-5, 1.75e-7),
+    "gpt-5.2-pro": (2.1e-5, 1.68e-4, None),
+    "gpt-5.3-codex": (1.75e-6, 1.4e-5, 1.75e-7),
+    "gpt-5.3-codex-spark": (0.0, 0.0, 0.0),
+    "gpt-5.3-codex-spark-preview": (0.0, 0.0, 0.0),
+    "gpt-5.4": (2.5e-6, 1.5e-5, 2.5e-7),
+    "gpt-5.4-mini": (7.5e-7, 4.5e-6, 7.5e-8),
+    "gpt-5.4-nano": (2e-7, 1.25e-6, 2e-8),
+    "gpt-5.4-pro": (3e-5, 1.8e-4, None),
+}
+
+MODEL_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+SESSION_ID_RE = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+FILENAME_DAY_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+@dataclass
+class UsageEvent:
+    session_id: str
+    session_title: str | None
+    day: str
+    timestamp: str
+    model: str
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    plan_type: str | None
+    estimated_cost_usd: float | None
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass
+class Aggregate:
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    events: int = 0
+    estimated_cost_usd: float = 0.0
+    has_cost: bool = False
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def cached_ratio(self) -> float:
+        if self.input_tokens <= 0:
+            return 0.0
+        return self.cached_input_tokens / self.input_tokens
+
+    def add(self, event: UsageEvent) -> None:
+        self.input_tokens += event.input_tokens
+        self.cached_input_tokens += event.cached_input_tokens
+        self.output_tokens += event.output_tokens
+        self.events += 1
+        if event.estimated_cost_usd is not None:
+            self.estimated_cost_usd += event.estimated_cost_usd
+            self.has_cost = True
+
+
+@dataclass
+class SessionAggregate(Aggregate):
+    session_id: str = ""
+    title: str | None = None
+    first_day: str | None = None
+    last_day: str | None = None
+    first_seen: str | None = None
+    last_seen: str | None = None
+    models: dict[str, int] = field(default_factory=dict)
+    plan_types: dict[str, int] = field(default_factory=dict)
+
+    def add(self, event: UsageEvent) -> None:
+        super().add(event)
+        self.first_day = min(filter(None, [self.first_day, event.day]), default=event.day)
+        self.last_day = max(filter(None, [self.last_day, event.day]), default=event.day)
+        self.first_seen = earlier_timestamp(self.first_seen, event.timestamp)
+        self.last_seen = later_timestamp(self.last_seen, event.timestamp)
+        self.models[event.model] = self.models.get(event.model, 0) + event.total_tokens
+        if event.plan_type:
+            self.plan_types[event.plan_type] = self.plan_types.get(event.plan_type, 0) + 1
+
+    @property
+    def top_model(self) -> str | None:
+        if not self.models:
+            return None
+        return max(self.models.items(), key=lambda item: item[1])[0]
+
+
+@dataclass
+class ScanDiagnostics:
+    discovered_files: int = 0
+    scanned_files: int = 0
+    duplicate_session_files: int = 0
+    parsed_events: int = 0
+    invalid_lines: int = 0
+    empty_sessions: int = 0
+
+
+@dataclass
+class UsageReport:
+    root: str
+    generated_at: str
+    since: str | None
+    until: str | None
+    summary: Aggregate
+    daily: dict[str, Aggregate]
+    daily_session_counts: dict[str, int]
+    models: dict[str, Aggregate]
+    sessions: dict[str, SessionAggregate]
+    plan_types: list[str]
+    diagnostics: ScanDiagnostics
+
+
+class TerminalUI:
+    COLORS = {
+        "reset": "\033[0m",
+        "bold": "\033[1m",
+        "dim": "\033[2m",
+        "cyan": "\033[36m",
+        "green": "\033[32m",
+        "yellow": "\033[33m",
+        "blue": "\033[34m",
+        "magenta": "\033[35m",
+        "red": "\033[31m",
+        "gray": "\033[90m",
+    }
+    SPINNER = ["|", "/", "-", "\\"]
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.last_progress_width = 0
+        self.spinner_index = 0
+
+    def style(self, text: str, *names: str) -> str:
+        if not self.enabled or not names:
+            return text
+        prefix = "".join(self.COLORS[name] for name in names)
+        return f"{prefix}{text}{self.COLORS['reset']}"
+
+    def clear(self) -> None:
+        if self.enabled:
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+
+    def update_progress(self, current: int, total: int, path: Path) -> None:
+        if not self.enabled:
+            return
+        spinner = self.SPINNER[self.spinner_index % len(self.SPINNER)]
+        self.spinner_index += 1
+        width = shutil.get_terminal_size((100, 24)).columns
+        path_text = shorten_middle(str(path), max(20, width - 28))
+        message = f"{spinner} Scanning {current}/{max(total, 1)}  {path_text}"
+        padded = message.ljust(max(self.last_progress_width, len(message)))
+        sys.stderr.write("\r" + self.style(padded, "cyan"))
+        sys.stderr.flush()
+        self.last_progress_width = len(padded)
+
+    def finish_progress(self) -> None:
+        if not self.enabled or self.last_progress_width == 0:
+            return
+        sys.stderr.write("\r" + (" " * self.last_progress_width) + "\r")
+        sys.stderr.flush()
+        self.last_progress_width = 0
+
+    def panel(self, title: str, lines: list[str], color: str = "blue") -> str:
+        content_widths = [len(strip_ansi(title))]
+        content_widths.extend(len(strip_ansi(line)) for line in lines)
+        width = max(content_widths, default=0) + 2
+        top = f"┌{'─' * (width + 2)}┐"
+        bottom = f"└{'─' * (width + 2)}┘"
+        title_line = f"│ {pad_visible(self.style(title, 'bold', color), width)} │"
+        body = [f"│ {pad_visible(line, width)} │" for line in lines]
+        return "\n".join([self.style(top, color), title_line, *body, self.style(bottom, color)])
+
+    def cards(self, cards: list[tuple[str, str, str, str]]) -> str:
+        if not cards:
+            return ""
+        term_width = shutil.get_terminal_size((100, 24)).columns
+        card_width = 24
+        columns = max(1, min(len(cards), term_width // (card_width + 2)))
+        rendered = [self._card(*card, width=card_width) for card in cards]
+        rows = []
+        for start in range(0, len(rendered), columns):
+            batch = rendered[start : start + columns]
+            split = [item.splitlines() for item in batch]
+            max_lines = max(len(block) for block in split)
+            for block in split:
+                while len(block) < max_lines:
+                    block.append(" " * len(strip_ansi(block[0])))
+            for idx in range(max_lines):
+                rows.append("  ".join(block[idx] for block in split))
+        return "\n".join(rows)
+
+    def _card(self, title: str, value: str, subtitle: str, color: str, width: int) -> str:
+        inner = width - 2
+        top = self.style(f"┌{'─' * width}┐", color)
+        bottom = self.style(f"└{'─' * width}┘", color)
+        lines = [
+            f"│ {pad_visible(self.style(title, 'bold', color), inner)} │",
+            f"│ {pad_visible(self.style(value, 'bold'), inner)} │",
+            f"│ {pad_visible(self.style(subtitle, 'dim'), inner)} │",
+        ]
+        return "\n".join([top, *lines, bottom])
+
+
+def default_codex_home() -> Path:
+    override = os.environ.get("CODEX_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".codex"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Local Codex Usage Viewer",
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=default_codex_home(),
+        help="Codex home directory. Defaults to $CODEX_HOME or ~/.codex.",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="Rolling day window to include. Ignored with --all or --since.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Include all locally available history.",
+    )
+    parser.add_argument(
+        "--since",
+        type=str,
+        help="Inclusive start date in YYYY-MM-DD format.",
+    )
+    parser.add_argument(
+        "--until",
+        type=str,
+        help="Inclusive end date in YYYY-MM-DD format. Defaults to today.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Rows to show in model and session sections.",
+    )
+    parser.add_argument(
+        "--daily-limit",
+        type=int,
+        default=14,
+        help="Rows to show in the daily section.",
+    )
+    parser.add_argument(
+        "--watch",
+        type=float,
+        default=0.0,
+        help="Refresh every N seconds.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of the terminal dashboard.",
+    )
+    parser.add_argument(
+        "--no-cost",
+        action="store_true",
+        help="Skip estimated-cost calculation and hide cost fields.",
+    )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Disable ANSI colors.",
+    )
+    parser.add_argument(
+        "--censored",
+        action="store_true",
+        help="Hide thread titles in dashboard and JSON output.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {VERSION}",
+    )
+    return parser.parse_args()
+
+
+def parse_day(text: str) -> date:
+    return date.fromisoformat(text)
+
+
+def choose_window(args: argparse.Namespace) -> tuple[date | None, date | None]:
+    if args.all:
+        return None, None
+    today = datetime.now().astimezone().date()
+    until = parse_day(args.until) if args.until else today
+    since = parse_day(args.since) if args.since else until - timedelta(days=max(args.days - 1, 0))
+    return since, until
+
+
+def list_session_files(root: Path, since: date | None, until: date | None) -> list[Path]:
+    sessions_root = root / "sessions"
+    archived_root = root / "archived_sessions"
+    files: list[Path] = []
+    yielded: set[Path] = set()
+
+    for path in iter_partitioned_files(sessions_root, since, until):
+        files.append(path)
+        yielded.add(path)
+
+    if archived_root.is_dir():
+        for path in sorted(archived_root.glob("*.jsonl")):
+            if path in yielded:
+                continue
+            day = day_from_filename(path.name)
+            if day is not None and since is not None and until is not None and (day < since or day > until):
+                continue
+            files.append(path)
+
+    return files
+
+
+def iter_partitioned_files(root: Path, since: date | None, until: date | None) -> Iterable[Path]:
+    if not root.is_dir():
+        return
+    if since is None or until is None:
+        yield from sorted(root.rglob("*.jsonl"))
+        return
+
+    current = since
+    while current <= until:
+        day_dir = root / f"{current.year:04d}" / f"{current.month:02d}" / f"{current.day:02d}"
+        if day_dir.is_dir():
+            yield from sorted(day_dir.glob("*.jsonl"))
+        current += timedelta(days=1)
+
+
+def day_from_filename(filename: str) -> date | None:
+    match = FILENAME_DAY_RE.search(filename)
+    if not match:
+        return None
+    try:
+        return date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
+def load_session_index(root: Path) -> dict[str, dict]:
+    session_index = root / "session_index.jsonl"
+    mapping: dict[str, dict] = {}
+    if not session_index.is_file():
+        return mapping
+    with session_index.open() as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            session_id = item.get("id")
+            if session_id:
+                mapping[session_id] = item
+    return mapping
+
+
+def normalize_model(raw: str | None) -> str:
+    if not raw:
+        return "unknown"
+    model = raw.strip()
+    if model.startswith("openai/"):
+        model = model.removeprefix("openai/")
+    if model in PRICING:
+        return model
+    stripped = MODEL_DATE_SUFFIX.sub("", model)
+    return stripped if stripped in PRICING else model
+
+
+def estimate_cost(model: str, input_tokens: int, cached_input_tokens: int, output_tokens: int) -> float | None:
+    pricing = PRICING.get(normalize_model(model))
+    if pricing is None:
+        return None
+    input_rate, output_rate, cached_rate = pricing
+    cached = max(0, min(cached_input_tokens, input_tokens))
+    non_cached = max(0, input_tokens - cached)
+    cache_read_rate = cached_rate if cached_rate is not None else input_rate
+    return non_cached * input_rate + cached * cache_read_rate + output_tokens * output_rate
+
+
+def parse_local_day(timestamp: str) -> str | None:
+    parsed = parse_local_timestamp(timestamp)
+    return parsed.date().isoformat() if parsed else None
+
+
+def parse_local_timestamp(timestamp: str) -> datetime | None:
+    if not timestamp:
+        return None
+    normalized = timestamp.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone()
+
+
+def normalize_local_timestamp(timestamp: str) -> str | None:
+    parsed = parse_local_timestamp(timestamp)
+    if parsed is None:
+        return None
+    return parsed.isoformat(timespec="seconds")
+
+
+def fallback_session_id(path: Path) -> str:
+    match = SESSION_ID_RE.search(path.name)
+    return match.group(1) if match else path.stem
+
+
+def parse_session_file(
+    path: Path,
+    session_index: dict[str, dict],
+    with_cost: bool,
+) -> tuple[str, str | None, list[UsageEvent], int]:
+    current_model: str | None = None
+    previous_totals: tuple[int, int, int] | None = None
+    session_id: str | None = None
+    last_plan_type: str | None = None
+    events: list[UsageEvent] = []
+    invalid_lines = 0
+
+    with path.open() as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_lines += 1
+                continue
+
+            item_type = item.get("type")
+            payload = item.get("payload") or {}
+
+            if item_type == "session_meta":
+                session_id = (
+                    payload.get("session_id")
+                    or payload.get("sessionId")
+                    or payload.get("id")
+                    or item.get("session_id")
+                    or item.get("sessionId")
+                    or item.get("id")
+                )
+                continue
+
+            if item_type == "turn_context":
+                current_model = payload.get("model") or (payload.get("info") or {}).get("model") or current_model
+                continue
+
+            if item_type != "event_msg" or payload.get("type") != "token_count":
+                continue
+
+            info = payload.get("info") or {}
+            total_usage = info.get("total_token_usage") or {}
+            last_usage = info.get("last_token_usage") or {}
+            if not total_usage and not last_usage:
+                continue
+
+            normalized_timestamp = normalize_local_timestamp(item.get("timestamp", ""))
+            if normalized_timestamp is None:
+                continue
+            day = parse_local_day(normalized_timestamp)
+            if day is None:
+                continue
+
+            model = (
+                info.get("model")
+                or info.get("model_name")
+                or payload.get("model")
+                or item.get("model")
+                or current_model
+                or "gpt-5"
+            )
+            plan_type = (payload.get("rate_limits") or {}).get("plan_type") or last_plan_type
+            if plan_type:
+                last_plan_type = plan_type
+
+            input_delta, cached_delta, output_delta, previous_totals = token_delta(
+                total_usage=total_usage,
+                last_usage=last_usage,
+                previous_totals=previous_totals,
+            )
+            if input_delta == 0 and cached_delta == 0 and output_delta == 0:
+                continue
+
+            effective_session_id = session_id or fallback_session_id(path)
+            session_title = (session_index.get(effective_session_id) or {}).get("thread_name")
+            normalized_model = normalize_model(model)
+            estimated = None if not with_cost else estimate_cost(normalized_model, input_delta, cached_delta, output_delta)
+            events.append(
+                UsageEvent(
+                    session_id=effective_session_id,
+                    session_title=session_title,
+                    day=day,
+                    timestamp=normalized_timestamp,
+                    model=normalized_model,
+                    input_tokens=input_delta,
+                    cached_input_tokens=cached_delta,
+                    output_tokens=output_delta,
+                    plan_type=plan_type,
+                    estimated_cost_usd=estimated,
+                )
+            )
+
+    effective_session_id = session_id or fallback_session_id(path)
+    session_title = (session_index.get(effective_session_id) or {}).get("thread_name")
+    return effective_session_id, session_title, events, invalid_lines
+
+
+def token_delta(
+    *,
+    total_usage: dict,
+    last_usage: dict,
+    previous_totals: tuple[int, int, int] | None,
+) -> tuple[int, int, int, tuple[int, int, int] | None]:
+    def as_int(value: object) -> int:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        return 0
+
+    if total_usage:
+        input_total = as_int(total_usage.get("input_tokens"))
+        cached_total = as_int(total_usage.get("cached_input_tokens", total_usage.get("cache_read_input_tokens")))
+        output_total = as_int(total_usage.get("output_tokens"))
+        if previous_totals is None:
+            input_delta, cached_delta, output_delta = input_total, cached_total, output_total
+        else:
+            input_delta = max(0, input_total - previous_totals[0])
+            cached_delta = max(0, cached_total - previous_totals[1])
+            output_delta = max(0, output_total - previous_totals[2])
+        return input_delta, min(cached_delta, input_delta), output_delta, (input_total, cached_total, output_total)
+
+    input_delta = max(0, as_int(last_usage.get("input_tokens")))
+    cached_delta = max(0, as_int(last_usage.get("cached_input_tokens", last_usage.get("cache_read_input_tokens"))))
+    output_delta = max(0, as_int(last_usage.get("output_tokens")))
+    return input_delta, min(cached_delta, input_delta), output_delta, previous_totals
+
+
+def collect_events(
+    root: Path,
+    since: date | None,
+    until: date | None,
+    with_cost: bool,
+    progress: Callable[[int, int, Path], None] | None = None,
+) -> tuple[list[UsageEvent], ScanDiagnostics]:
+    session_index = load_session_index(root)
+    seen_session_ids: set[str] = set()
+    diagnostics = ScanDiagnostics()
+    files = list_session_files(root, since, until)
+    diagnostics.discovered_files = len(files)
+    collected: list[UsageEvent] = []
+
+    for index, path in enumerate(files, start=1):
+        if progress:
+            progress(index, diagnostics.discovered_files, path)
+        session_id, _, events, invalid_lines = parse_session_file(path, session_index, with_cost=with_cost)
+        diagnostics.scanned_files += 1
+        diagnostics.invalid_lines += invalid_lines
+
+        if session_id in seen_session_ids:
+            diagnostics.duplicate_session_files += 1
+            continue
+        seen_session_ids.add(session_id)
+
+        if not events:
+            diagnostics.empty_sessions += 1
+            continue
+
+        for event in events:
+            if since is not None and event.day < since.isoformat():
+                continue
+            if until is not None and event.day > until.isoformat():
+                continue
+            collected.append(event)
+
+    diagnostics.parsed_events = len(collected)
+    return collected, diagnostics
+
+
+def aggregate(events: list[UsageEvent]) -> tuple[Aggregate, dict[str, Aggregate], dict[str, Aggregate], dict[str, SessionAggregate]]:
+    summary = Aggregate()
+    daily: dict[str, Aggregate] = defaultdict(Aggregate)
+    models: dict[str, Aggregate] = defaultdict(Aggregate)
+    sessions: dict[str, SessionAggregate] = {}
+
+    for event in events:
+        summary.add(event)
+        daily[event.day].add(event)
+        models[event.model].add(event)
+        if event.session_id not in sessions:
+            sessions[event.session_id] = SessionAggregate(session_id=event.session_id, title=event.session_title)
+        sessions[event.session_id].add(event)
+
+    return summary, daily, models, sessions
+
+
+def build_report(
+    root: Path,
+    since: date | None,
+    until: date | None,
+    events: list[UsageEvent],
+    diagnostics: ScanDiagnostics,
+) -> UsageReport:
+    summary, daily, models, sessions = aggregate(events)
+    plan_types = sorted({event.plan_type for event in events if event.plan_type})
+    daily_session_sets: dict[str, set[str]] = defaultdict(set)
+    for event in events:
+        daily_session_sets[event.day].add(event.session_id)
+    return UsageReport(
+        root=str(root),
+        generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        since=since.isoformat() if since else None,
+        until=until.isoformat() if until else None,
+        summary=summary,
+        daily=daily,
+        daily_session_counts={day: len(session_ids) for day, session_ids in daily_session_sets.items()},
+        models=models,
+        sessions=sessions,
+        plan_types=plan_types,
+        diagnostics=diagnostics,
+    )
+
+
+def format_int(value: int) -> str:
+    return f"{value:,}"
+
+
+def format_compact_int(value: int) -> str:
+    absolute = abs(value)
+    if absolute >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if absolute >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if absolute >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+
+def format_cost(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"${value:,.2f}"
+
+
+def format_percent(value: float) -> str:
+    return f"{value * 100:.1f}%"
+
+
+def shorten_middle(text: str, width: int) -> str:
+    if width <= 0 or len(text) <= width:
+        return text
+    if width <= 5:
+        return text[:width]
+    keep = width - 1
+    left = keep // 2
+    right = keep - left
+    return text[:left] + "…" + text[-right:]
+
+
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def pad_visible(text: str, width: int, *, right: bool = False) -> str:
+    visible_width = len(strip_ansi(text))
+    padding = max(width - visible_width, 0)
+    return (" " * padding + text) if right else (text + " " * padding)
+
+
+def earlier_timestamp(current: str | None, candidate: str | None) -> str | None:
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    return candidate if parse_local_timestamp(candidate) < parse_local_timestamp(current) else current
+
+
+def later_timestamp(current: str | None, candidate: str | None) -> str | None:
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    return candidate if parse_local_timestamp(candidate) > parse_local_timestamp(current) else current
+
+
+def format_pretty_datetime(timestamp: str | None) -> str:
+    if not timestamp:
+        return "-"
+    parsed = parse_local_timestamp(timestamp)
+    if parsed is None:
+        return timestamp
+    return parsed.strftime("%a %d %b %Y %H:%M")
+
+
+def format_short_datetime(timestamp: str | None) -> str:
+    if not timestamp:
+        return "-"
+    parsed = parse_local_timestamp(timestamp)
+    if parsed is None:
+        return timestamp
+    return parsed.strftime("%d %b %H:%M")
+
+
+def format_pretty_day(day_text: str) -> str:
+    try:
+        parsed = date.fromisoformat(day_text)
+    except ValueError:
+        return day_text
+    return parsed.strftime("%a %d %b")
+
+
+def metric_bar(value: int, maximum: int, width: int = 14, unicode_ok: bool = True) -> str:
+    if maximum <= 0:
+        return "-" * width
+    filled = max(0, min(width, round(width * (value / maximum))))
+    full = "█" if unicode_ok else "#"
+    empty = "░" if unicode_ok else "."
+    return full * filled + empty * (width - filled)
+
+
+def render_table(headers: list[str], rows: list[list[str]], align_right: set[int] | None = None) -> str:
+    if align_right is None:
+        align_right = set()
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], len(strip_ansi(cell)))
+
+    def pad(cell: str, width: int, right: bool) -> str:
+        text_width = len(strip_ansi(cell))
+        padding = max(width - text_width, 0)
+        return (" " * padding + cell) if right else (cell + " " * padding)
+
+    def render_row(row: list[str]) -> str:
+        pieces = []
+        for idx, cell in enumerate(row):
+            pieces.append(pad(cell, widths[idx], idx in align_right))
+        return "  ".join(pieces)
+
+    divider = render_row(["-" * width for width in widths])
+    return "\n".join([render_row(headers), divider, *[render_row(row) for row in rows]])
+
+
+def window_label(report: UsageReport) -> str:
+    if report.since is None or report.until is None:
+        return "All local history"
+    if report.since == report.until:
+        return format_pretty_day(report.since)
+    return f"{format_pretty_day(report.since)} to {format_pretty_day(report.until)}"
+
+
+def build_cards(report: UsageReport, with_cost: bool) -> list[tuple[str, str, str, str]]:
+    cards = [
+        ("Sessions", format_int(len(report.sessions)), "unique local sessions", "blue"),
+        ("Active Days", format_int(len(report.daily)), "days with usage", "cyan"),
+        ("Total Tokens", format_compact_int(report.summary.total_tokens), "input + output", "green"),
+        ("Cached Ratio", format_percent(report.summary.cached_ratio), "cached / input", "yellow"),
+    ]
+    if with_cost:
+        cost_value = format_cost(report.summary.estimated_cost_usd if report.summary.has_cost else None)
+        cards.append(("Est. Cost", cost_value, "heuristic only", "magenta"))
+    else:
+        cards.append(("Output Tokens", format_compact_int(report.summary.output_tokens), "non-cached output", "magenta"))
+    return cards
+
+
+def build_dashboard(
+    report: UsageReport,
+    ui: TerminalUI,
+    *,
+    limit: int,
+    daily_limit: int,
+    with_cost: bool,
+    censored: bool,
+) -> str:
+    unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
+    lines: list[str] = []
+
+    header_lines = [
+        f"Window: {window_label(report)}",
+        f"Generated: {format_pretty_datetime(report.generated_at)}",
+        (
+            f"Scanned {report.diagnostics.scanned_files}/{report.diagnostics.discovered_files} files"
+            f" • {report.diagnostics.parsed_events} usage events"
+            f" • {report.diagnostics.duplicate_session_files} duplicate session files skipped"
+        ),
+    ]
+    if report.plan_types:
+        header_lines.append(f"Plan types: {', '.join(report.plan_types)}")
+    if censored:
+        header_lines.append("Privacy: thread titles hidden")
+    lines.append(ui.panel("Local Codex Usage Viewer", header_lines, color="cyan"))
+    lines.append(ui.cards(build_cards(report, with_cost)))
+
+    daily_rows: list[list[str]] = []
+    max_daily_total = max((aggregate.total_tokens for aggregate in report.daily.values()), default=0)
+    for day_key, aggregate_row in sorted(report.daily.items(), reverse=True)[:daily_limit]:
+        row = [
+            format_pretty_day(day_key),
+            str(report.daily_session_counts.get(day_key, 0)),
+            format_int(aggregate_row.total_tokens),
+            format_int(aggregate_row.output_tokens),
+            metric_bar(aggregate_row.total_tokens, max_daily_total, unicode_ok=unicode_ok),
+        ]
+        if with_cost:
+            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+        daily_rows.append(row)
+    if daily_rows:
+        headers = ["Day", "Sess", "Total", "Output", "Activity"]
+        align_right = {1, 2, 3}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(5)
+        daily_table = render_table(headers, daily_rows, align_right=align_right)
+        lines.append(ui.panel("Daily", daily_table.splitlines(), color="green"))
+
+    model_rows: list[list[str]] = []
+    max_model_total = max((aggregate.total_tokens for aggregate in report.models.values()), default=0)
+    sorted_models = sorted(
+        report.models.items(),
+        key=lambda item: item[1].estimated_cost_usd if (with_cost and item[1].has_cost) else item[1].total_tokens,
+        reverse=True,
+    )[:limit]
+    for model, aggregate_row in sorted_models:
+        row = [
+            model,
+            format_int(aggregate_row.total_tokens),
+            format_percent(aggregate_row.cached_ratio),
+            format_int(aggregate_row.output_tokens),
+            metric_bar(aggregate_row.total_tokens, max_model_total, unicode_ok=unicode_ok),
+        ]
+        if with_cost:
+            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+        model_rows.append(row)
+    if model_rows:
+        headers = ["Model", "Total", "Cached", "Output", "Activity"]
+        align_right = {1, 2, 3}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(5)
+        model_table = render_table(headers, model_rows, align_right=align_right)
+        lines.append(ui.panel("Models", model_table.splitlines(), color="yellow"))
+
+    session_rows: list[list[str]] = []
+    max_session_total = max((session.total_tokens for session in report.sessions.values()), default=0)
+    sorted_sessions = sorted(
+        report.sessions.values(),
+        key=lambda item: item.estimated_cost_usd if (with_cost and item.has_cost) else item.total_tokens,
+        reverse=True,
+    )[:limit]
+    for session in sorted_sessions:
+        row = [
+            format_short_datetime(session.last_seen or session.last_day),
+            session.top_model or "-",
+            format_int(session.total_tokens),
+            metric_bar(session.total_tokens, max_session_total, unicode_ok=unicode_ok),
+        ]
+        if with_cost:
+            row.append(format_cost(session.estimated_cost_usd if session.has_cost else None))
+        if not censored:
+            title = shorten_middle(session.title or session.session_id, 40)
+            row.append(title)
+        session_rows.append(row)
+    if session_rows:
+        headers = ["Last Seen", "Model", "Total", "Activity"]
+        align_right = {2}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(4)
+        if not censored:
+            headers.append("Thread")
+        session_table = render_table(headers, session_rows, align_right=align_right)
+        lines.append(ui.panel("Top Sessions", session_table.splitlines(), color="magenta"))
+
+    footer_lines = [
+        (
+            f"Source root: {'[hidden]' if censored else report.root}"
+            f" • invalid lines: {report.diagnostics.invalid_lines}"
+            f" • empty sessions: {report.diagnostics.empty_sessions}"
+        ),
+        "Estimated cost uses a local heuristic. Treat it as relative guidance, not billing truth.",
+    ]
+    lines.append(ui.panel("Notes", footer_lines, color="gray"))
+    return "\n\n".join(lines)
+
+
+def build_json_report(report: UsageReport, *, censored: bool) -> dict:
+    return {
+        "root": None if censored else report.root,
+        "generated_at": report.generated_at,
+        "window": {"since": report.since, "until": report.until},
+        "summary": asdict(report.summary),
+        "plan_types": report.plan_types,
+        "diagnostics": asdict(report.diagnostics),
+        "daily": {key: asdict(value) for key, value in sorted(report.daily.items())},
+        "daily_session_counts": report.daily_session_counts,
+        "models": {key: asdict(value) for key, value in sorted(report.models.items())},
+        "sessions": {
+            key: {
+                **asdict(value),
+                "title": None if censored else value.title,
+                "top_model": value.top_model,
+            }
+            for key, value in sorted(report.sessions.items())
+        },
+    }
+
+
+def ui_enabled(args: argparse.Namespace) -> bool:
+    if args.json or args.plain:
+        return False
+    if not sys.stdout.isatty() or not sys.stderr.isatty():
+        return False
+    return os.environ.get("TERM", "").lower() != "dumb"
+
+
+def run_once(args: argparse.Namespace, ui: TerminalUI) -> UsageReport:
+    root = args.root.expanduser()
+    since, until = choose_window(args)
+    events, diagnostics = collect_events(
+        root,
+        since,
+        until,
+        with_cost=not args.no_cost,
+        progress=ui.update_progress if ui.enabled else None,
+    )
+    ui.finish_progress()
+    return build_report(root, since, until, events, diagnostics)
+
+
+def render_plain_or_json(report: UsageReport, args: argparse.Namespace, ui: TerminalUI) -> str:
+    if args.json:
+        return json.dumps(build_json_report(report, censored=args.censored), indent=2, sort_keys=True)
+
+    if report.diagnostics.parsed_events == 0:
+        return "No local Codex usage found in the selected window."
+
+    return build_dashboard(
+        report,
+        ui=ui,
+        limit=args.limit,
+        daily_limit=args.daily_limit,
+        with_cost=not args.no_cost,
+        censored=args.censored,
+    )
+
+
+def main() -> int:
+    args = parse_args()
+    ui = TerminalUI(enabled=ui_enabled(args))
+
+    try:
+        while True:
+            report = run_once(args, ui)
+            output = render_plain_or_json(report, args, ui)
+
+            if args.json:
+                print(output)
+                return 0
+
+            if ui.enabled:
+                ui.clear()
+            print(output)
+
+            if args.watch <= 0:
+                return 0
+
+            time.sleep(args.watch)
+    except KeyboardInterrupt:
+        if ui.enabled:
+            ui.finish_progress()
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

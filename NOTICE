@@ -1,0 +1,11 @@
+Local Codex Usage Viewer includes logic adapted from CodexBar's local Codex
+usage scanner and pricing heuristics.
+
+Source references:
+- https://github.com/steipete/CodexBar/blob/main/docs/codex.md#cost-usage-local-log-scan
+- https://github.com/steipete/CodexBar/blob/main/Sources/CodexBarCore/Vendored/CostUsage/CostUsageScanner.swift
+- https://github.com/steipete/CodexBar/blob/main/Sources/CodexBarCore/Vendored/CostUsage/CostUsageScanner%2BTimestamp.swift
+- https://github.com/steipete/CodexBar/blob/main/Sources/CodexBarCore/Vendored/CostUsage/CostUsagePricing.swift
+
+CodexBar is Copyright (c) 2026 Peter Steinberger and distributed under the MIT
+License. See the CodexBar repository for full license text.
