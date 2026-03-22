@@ -1,12 +1,13 @@
 ---
 name: local-codex-usage-viewer
-description: Inspect local Codex usage logs and render offline summaries. Use when the user asks about Codex usage, token usage, local analytics, session activity, local cost estimates, or wants a privacy-aware usage report from ~/.codex or $CODEX_HOME.
+description: Inspect local Codex usage logs and render offline summaries. Use when the user asks about Codex usage, token usage, local analytics, session activity, local cost estimates, experimental limit progress, or wants a privacy-aware usage report from ~/.codex or $CODEX_HOME.
 ---
 # Local Codex Usage Viewer
 
 ## Use This Skill When
 
 - The user wants to understand Codex usage without hosted analytics.
+- The user has Codex analytics off and still wants private, local-only usage tracking.
 - The user asks for local token counts, session summaries, model usage, or rough cost estimates.
 - The user wants a privacy-safe report to share with others.
 - The user wants structured JSON output for post-processing or automation.
