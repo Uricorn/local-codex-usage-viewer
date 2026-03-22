@@ -19,7 +19,33 @@ Run the installed command when available:
 local-codex-usage-viewer
 ```
 
+Check whether the installed command exists:
+
+```bash
+command -v local-codex-usage-viewer
+```
+
 Repository-local fallback:
+
+```bash
+python3 codex_usage.py
+```
+
+If the command is missing and network access is available, install it:
+
+Preferred isolated install:
+
+```bash
+pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
+```
+
+If `pipx` is unavailable, install it into the current Python environment:
+
+```bash
+python3 -m pip install git+https://github.com/uricorn/local-codex-usage-viewer.git
+```
+
+If you are already inside a repository checkout, no install is required. Use:
 
 ```bash
 python3 codex_usage.py
@@ -39,8 +65,10 @@ Useful options:
 
 ## Agent Guidance
 
-1. Prefer the dashboard view for human-facing answers.
-2. Prefer `--json` when you need to post-process or summarize results programmatically.
-3. Use `--censored` before sharing output that could expose thread titles or the local Codex home path.
-4. Use `--no-cost` when the user only wants activity, not a pricing estimate.
-5. Treat cost as heuristic only. Do not present it as billing truth.
+1. Before assuming the tool is unavailable, check `command -v local-codex-usage-viewer`.
+2. If the command is missing, prefer `pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git` when installation is appropriate.
+3. Prefer the dashboard view for human-facing answers.
+4. Prefer `--json` when you need to post-process or summarize results programmatically.
+5. Use `--censored` before sharing output that could expose thread titles or the local Codex home path.
+6. Use `--no-cost` when the user only wants activity, not a pricing estimate.
+7. Treat cost as heuristic only. Do not present it as billing truth.
