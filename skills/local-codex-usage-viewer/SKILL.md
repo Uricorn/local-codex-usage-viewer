@@ -18,20 +18,20 @@ description: Inspect local Codex usage logs and render offline summaries. Use wh
 Run the installed command when available:
 
 ```bash
-local-codex-usage-viewer
+cuv
 ```
 
 Check whether the installed command exists:
 
 ```bash
-command -v local-codex-usage-viewer
+command -v cuv
 ```
 
 Show CLI help:
 
 ```bash
-local-codex-usage-viewer --help
-local-codex-usage-viewer help daily
+cuv --help
+cuv help daily
 ```
 
 Repository-local fallback:
@@ -47,6 +47,8 @@ Preferred isolated install:
 ```bash
 pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
+
+These install commands must be run in a terminal. A repo checkout by itself does not create a shell command on `PATH`.
 
 If `pipx` is unavailable, install it into the current Python environment:
 
@@ -78,14 +80,14 @@ Useful options:
 Useful JSON extraction:
 
 ```bash
-local-codex-usage-viewer --json | jq '.limits'
+cuv --json | jq '.limits'
 ```
 
 This extracts only the experimental best-effort local rate-limit snapshot when one is present.
 
 ## Agent Guidance
 
-1. Before assuming the tool is unavailable, check `command -v local-codex-usage-viewer`.
+1. Before assuming the tool is unavailable, check `command -v cuv`.
 2. If the command is missing, prefer `pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git` when installation is appropriate.
 3. Prefer the dashboard view for human-facing answers.
 4. Prefer `--json` when you need to post-process or summarize results programmatically.

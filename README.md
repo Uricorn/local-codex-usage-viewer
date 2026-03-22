@@ -29,17 +29,36 @@ This is for users and companies that have Codex analytics turned off but still w
 
 ## Installation
 
+If you only cloned the repo, `cuv` will not exist yet. You must either install it with one of the terminal commands below, or run `python3 codex_usage.py` directly from the checkout.
+
 ### Install with `pipx` from GitHub
 
-Use this if you want a clean, isolated install and a globally available `local-codex-usage-viewer` command.
+Run these commands in your terminal. This step installs the tool and creates a shell command on your `PATH`.
+
+Use this if you want a clean, isolated install and a globally available `cuv` command.
 
 ```bash
 pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
 
+If this is your first `pipx` install and the command is still not found afterwards, run:
+
+```bash
+pipx ensurepath
+```
+
+Then open a new terminal, or run `hash -r` in your current shell.
+
 This installs the latest version from GitHub and exposes the CLI on your shell path:
 
 ```bash
+cuv
+```
+
+The older aliases still work too:
+
+```bash
+codex-usage
 local-codex-usage-viewer
 ```
 
@@ -47,13 +66,19 @@ local-codex-usage-viewer
 
 Use this if you want the tool inside the current Python environment instead of an isolated `pipx` environment.
 
+Run these commands in your terminal. They install the package into that Python environment and expose its console scripts there.
+
 ```bash
 python3 -m pip install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
 
+If the command is still not found afterwards, the Python environment's script directory is probably not on your `PATH`.
+
 ### Install from a local clone
 
 Use this when you want to inspect the code, make changes, or install a local checkout.
+
+Run these commands in your terminal from the directory where you want the repo cloned.
 
 ```bash
 git clone https://github.com/uricorn/local-codex-usage-viewer.git
@@ -69,7 +94,7 @@ python3 -m pip install .
 
 ### Run without installing
 
-Use this for a one-off run directly from a checkout.
+Use this for a one-off run directly from a checkout. This does not create a shell command, it just runs the script directly.
 
 ```bash
 python3 codex_usage.py
@@ -78,80 +103,80 @@ python3 codex_usage.py
 ## Usage
 
 ```bash
-local-codex-usage-viewer
+cuv
 ```
 
 Scans the default Codex home directory and renders the terminal dashboard. When local limit snapshots are available in `logs_1.sqlite`, the dashboard also shows a `Limit Progress (Experimental)` panel.
 
 ```bash
-local-codex-usage-viewer --help
-local-codex-usage-viewer help daily
+cuv --help
+cuv help daily
 ```
 
 Shows general CLI help or focused help for a specific report command.
 
 ```bash
-local-codex-usage-viewer daily --days 7
+cuv daily --days 7
 ```
 
 Shows a day-by-day table with sessions, tokens, cached ratio, and optional estimated cost.
 
 ```bash
-local-codex-usage-viewer monthly --all
+cuv monthly --all
 ```
 
 Shows a month-by-month table across all locally available history.
 
 ```bash
-local-codex-usage-viewer sessions --days 7 --censored
+cuv sessions --days 7 --censored
 ```
 
 Shows the top local sessions in the selected window. With `--censored`, thread titles stay hidden.
 
 ```bash
-local-codex-usage-viewer --days 7
+cuv --days 7
 ```
 
 Limits the report to the last 7 days instead of the default rolling window.
 
 ```bash
-local-codex-usage-viewer --watch 5
+cuv --watch 5
 ```
 
 Refreshes the dashboard every 5 seconds so you can keep it open while working.
 
 ```bash
-local-codex-usage-viewer --json > usage.json
+cuv --json > usage.json
 ```
 
 Writes machine-readable JSON instead of the dashboard, which is useful for scripts and automation. The JSON includes a top-level `limits` object when a local rate-limit snapshot is available.
 
 ```bash
-local-codex-usage-viewer --json | jq '.limits'
+cuv --json | jq '.limits'
 ```
 
 Prints only the current experimental local limit snapshot from JSON output, which is useful when you want to inspect rate-limit progress separately from the rest of the usage report.
 
 ```bash
-local-codex-usage-viewer monthly --json
+cuv monthly --json
 ```
 
 Writes a focused machine-readable monthly report with a `rows` array instead of the full dashboard payload.
 
 ```bash
-local-codex-usage-viewer --all --no-cost
+cuv --all --no-cost
 ```
 
 Scans all locally available history and hides heuristic cost estimates.
 
 ```bash
-local-codex-usage-viewer --censored
+cuv --censored
 ```
 
 Hides thread titles and the local source path so the output is safer to share. Limit progress stays visible because it comes from local rate-limit metadata, not thread text.
 
 ```bash
-local-codex-usage-viewer --root /path/to/codex-home
+cuv --root /path/to/codex-home
 ```
 
 Scans a different Codex home directory instead of the default `~/.codex` or `$CODEX_HOME`.

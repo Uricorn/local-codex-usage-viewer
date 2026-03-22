@@ -9,20 +9,20 @@ This is especially useful when Codex analytics are off and someone still wants p
 If installed:
 
 ```bash
-local-codex-usage-viewer
+cuv
 ```
 
 Check whether it is already installed:
 
 ```bash
-command -v local-codex-usage-viewer
+command -v cuv
 ```
 
 Show CLI help:
 
 ```bash
-local-codex-usage-viewer --help
-local-codex-usage-viewer help daily
+cuv --help
+cuv help daily
 ```
 
 If working from this repository checkout:
@@ -36,6 +36,8 @@ If the command is missing and installation makes sense:
 ```bash
 pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
+
+That install step must be run in a terminal. A plain repo checkout does not create a shell command on `PATH`.
 
 ## Useful Flags
 
@@ -55,7 +57,7 @@ pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
 Useful JSON extraction:
 
 ```bash
-local-codex-usage-viewer --json | jq '.limits'
+cuv --json | jq '.limits'
 ```
 
 ## Notes

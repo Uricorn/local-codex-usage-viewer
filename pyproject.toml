@@ -32,6 +32,8 @@ Repository = "https://github.com/uricorn/local-codex-usage-viewer"
 Issues = "https://github.com/uricorn/local-codex-usage-viewer/issues"
 
 [project.scripts]
+cuv = "codex_usage:main"
+codex-usage = "codex_usage:main"
 local-codex-usage-viewer = "codex_usage:main"
 
 [tool.setuptools]
