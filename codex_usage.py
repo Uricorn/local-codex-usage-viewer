@@ -176,6 +176,8 @@ class UsageReport:
     summary: Aggregate
     daily: dict[str, Aggregate]
     daily_session_counts: dict[str, int]
+    monthly: dict[str, Aggregate]
+    monthly_session_counts: dict[str, int]
     models: dict[str, Aggregate]
     sessions: dict[str, SessionAggregate]
     plan_types: list[str]
@@ -305,6 +307,13 @@ def as_bool(value: object) -> bool | None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Local Codex Usage Viewer",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["dashboard", "daily", "monthly", "sessions"],
+        default="dashboard",
+        help="Report type to render. Defaults to dashboard.",
     )
     parser.add_argument(
         "--root",
@@ -810,6 +819,10 @@ def aggregate(events: list[UsageEvent]) -> tuple[Aggregate, dict[str, Aggregate]
     return summary, daily, models, sessions
 
 
+def month_from_day(day_text: str) -> str:
+    return day_text[:7]
+
+
 def build_report(
     root: Path,
     since: date | None,
@@ -820,8 +833,13 @@ def build_report(
     summary, daily, models, sessions = aggregate(events)
     plan_types = sorted({event.plan_type for event in events if event.plan_type})
     daily_session_sets: dict[str, set[str]] = defaultdict(set)
+    monthly: dict[str, Aggregate] = defaultdict(Aggregate)
+    monthly_session_sets: dict[str, set[str]] = defaultdict(set)
     for event in events:
         daily_session_sets[event.day].add(event.session_id)
+        month_key = month_from_day(event.day)
+        monthly[month_key].add(event)
+        monthly_session_sets[month_key].add(event.session_id)
     limits = load_limit_snapshot(root)
     return UsageReport(
         root=str(root),
@@ -831,6 +849,8 @@ def build_report(
         summary=summary,
         daily=daily,
         daily_session_counts={day: len(session_ids) for day, session_ids in daily_session_sets.items()},
+        monthly=monthly,
+        monthly_session_counts={key: len(session_ids) for key, session_ids in monthly_session_sets.items()},
         models=models,
         sessions=sessions,
         plan_types=plan_types,
@@ -925,6 +945,14 @@ def format_pretty_day(day_text: str) -> str:
     except ValueError:
         return day_text
     return parsed.strftime("%a %d %b")
+
+
+def format_pretty_month(month_text: str) -> str:
+    try:
+        parsed = date.fromisoformat(f"{month_text}-01")
+    except ValueError:
+        return month_text
+    return parsed.strftime("%b %Y")
 
 
 def format_window_minutes(value: int | None) -> str:
@@ -1053,6 +1081,106 @@ def build_limit_panel(snapshot: LimitSnapshot, ui: TerminalUI, *, unicode_ok: bo
     return ui.panel("Limit Progress (Experimental)", lines, color="red")
 
 
+def sorted_sessions(report: UsageReport, *, with_cost: bool, limit: int | None = None) -> list[SessionAggregate]:
+    rows = sorted(
+        report.sessions.values(),
+        key=lambda item: item.estimated_cost_usd if (with_cost and item.has_cost) else item.total_tokens,
+        reverse=True,
+    )
+    return rows if limit is None else rows[:limit]
+
+
+def build_daily_rows(report: UsageReport, *, with_cost: bool, limit: int, unicode_ok: bool) -> list[list[str]]:
+    rows: list[list[str]] = []
+    max_daily_total = max((aggregate.total_tokens for aggregate in report.daily.values()), default=0)
+    for day_key, aggregate_row in sorted(report.daily.items(), reverse=True)[:limit]:
+        row = [
+            format_pretty_day(day_key),
+            str(report.daily_session_counts.get(day_key, 0)),
+            format_int(aggregate_row.input_tokens),
+            format_int(aggregate_row.cached_input_tokens),
+            format_int(aggregate_row.output_tokens),
+            format_int(aggregate_row.total_tokens),
+            format_percent(aggregate_row.cached_ratio),
+            metric_bar(aggregate_row.total_tokens, max_daily_total, unicode_ok=unicode_ok),
+        ]
+        if with_cost:
+            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+        rows.append(row)
+    return rows
+
+
+def build_monthly_rows(report: UsageReport, *, with_cost: bool, limit: int, unicode_ok: bool) -> list[list[str]]:
+    rows: list[list[str]] = []
+    max_monthly_total = max((aggregate.total_tokens for aggregate in report.monthly.values()), default=0)
+    for month_key, aggregate_row in sorted(report.monthly.items(), reverse=True)[:limit]:
+        row = [
+            format_pretty_month(month_key),
+            str(report.monthly_session_counts.get(month_key, 0)),
+            format_int(aggregate_row.input_tokens),
+            format_int(aggregate_row.cached_input_tokens),
+            format_int(aggregate_row.output_tokens),
+            format_int(aggregate_row.total_tokens),
+            format_percent(aggregate_row.cached_ratio),
+            metric_bar(aggregate_row.total_tokens, max_monthly_total, unicode_ok=unicode_ok),
+        ]
+        if with_cost:
+            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+        rows.append(row)
+    return rows
+
+
+def build_model_rows(report: UsageReport, *, with_cost: bool, limit: int, unicode_ok: bool) -> list[list[str]]:
+    rows: list[list[str]] = []
+    max_model_total = max((aggregate.total_tokens for aggregate in report.models.values()), default=0)
+    selected = sorted(
+        report.models.items(),
+        key=lambda item: item[1].estimated_cost_usd if (with_cost and item[1].has_cost) else item[1].total_tokens,
+        reverse=True,
+    )[:limit]
+    for model, aggregate_row in selected:
+        row = [
+            model,
+            format_int(aggregate_row.total_tokens),
+            format_percent(aggregate_row.cached_ratio),
+            format_int(aggregate_row.output_tokens),
+            metric_bar(aggregate_row.total_tokens, max_model_total, unicode_ok=unicode_ok),
+        ]
+        if with_cost:
+            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+        rows.append(row)
+    return rows
+
+
+def build_session_rows(
+    report: UsageReport,
+    *,
+    with_cost: bool,
+    limit: int,
+    unicode_ok: bool,
+    censored: bool,
+) -> list[list[str]]:
+    rows: list[list[str]] = []
+    max_session_total = max((session.total_tokens for session in report.sessions.values()), default=0)
+    for session in sorted_sessions(report, with_cost=with_cost, limit=limit):
+        row = [
+            format_short_datetime(session.last_seen or session.last_day),
+            session.top_model or "-",
+            format_int(session.input_tokens),
+            format_int(session.cached_input_tokens),
+            format_int(session.output_tokens),
+            format_int(session.total_tokens),
+            format_percent(session.cached_ratio),
+            metric_bar(session.total_tokens, max_session_total, unicode_ok=unicode_ok),
+        ]
+        if with_cost:
+            row.append(format_cost(session.estimated_cost_usd if session.has_cost else None))
+        if not censored:
+            row.append(shorten_middle(session.title or session.session_id, 40))
+        rows.append(row)
+    return rows
+
+
 def window_label(report: UsageReport) -> str:
     if report.since is None or report.until is None:
         return "All local history"
@@ -1076,18 +1204,7 @@ def build_cards(report: UsageReport, with_cost: bool) -> list[tuple[str, str, st
     return cards
 
 
-def build_dashboard(
-    report: UsageReport,
-    ui: TerminalUI,
-    *,
-    limit: int,
-    daily_limit: int,
-    with_cost: bool,
-    censored: bool,
-) -> str:
-    unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
-    lines: list[str] = []
-
+def build_header_panel(report: UsageReport, ui: TerminalUI, *, censored: bool) -> str:
     header_lines = [
         f"Window: {window_label(report)}",
         f"Generated: {format_pretty_datetime(report.generated_at)}",
@@ -1101,94 +1218,10 @@ def build_dashboard(
         header_lines.append(f"Plan types: {', '.join(report.plan_types)}")
     if censored:
         header_lines.append("Privacy: thread titles hidden")
-    lines.append(ui.panel("Local Codex Usage Viewer", header_lines, color="cyan"))
-    lines.append(ui.cards(build_cards(report, with_cost)))
+    return ui.panel("Local Codex Usage Viewer", header_lines, color="cyan")
 
-    if report.limits is not None:
-        limit_panel = build_limit_panel(report.limits, ui, unicode_ok=unicode_ok)
-        if limit_panel is not None:
-            lines.append(limit_panel)
 
-    daily_rows: list[list[str]] = []
-    max_daily_total = max((aggregate.total_tokens for aggregate in report.daily.values()), default=0)
-    for day_key, aggregate_row in sorted(report.daily.items(), reverse=True)[:daily_limit]:
-        row = [
-            format_pretty_day(day_key),
-            str(report.daily_session_counts.get(day_key, 0)),
-            format_int(aggregate_row.total_tokens),
-            format_int(aggregate_row.output_tokens),
-            metric_bar(aggregate_row.total_tokens, max_daily_total, unicode_ok=unicode_ok),
-        ]
-        if with_cost:
-            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
-        daily_rows.append(row)
-    if daily_rows:
-        headers = ["Day", "Sess", "Total", "Output", "Activity"]
-        align_right = {1, 2, 3}
-        if with_cost:
-            headers.append("Est. Cost")
-            align_right.add(5)
-        daily_table = render_table(headers, daily_rows, align_right=align_right)
-        lines.append(ui.panel("Daily", daily_table.splitlines(), color="green"))
-
-    model_rows: list[list[str]] = []
-    max_model_total = max((aggregate.total_tokens for aggregate in report.models.values()), default=0)
-    sorted_models = sorted(
-        report.models.items(),
-        key=lambda item: item[1].estimated_cost_usd if (with_cost and item[1].has_cost) else item[1].total_tokens,
-        reverse=True,
-    )[:limit]
-    for model, aggregate_row in sorted_models:
-        row = [
-            model,
-            format_int(aggregate_row.total_tokens),
-            format_percent(aggregate_row.cached_ratio),
-            format_int(aggregate_row.output_tokens),
-            metric_bar(aggregate_row.total_tokens, max_model_total, unicode_ok=unicode_ok),
-        ]
-        if with_cost:
-            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
-        model_rows.append(row)
-    if model_rows:
-        headers = ["Model", "Total", "Cached", "Output", "Activity"]
-        align_right = {1, 2, 3}
-        if with_cost:
-            headers.append("Est. Cost")
-            align_right.add(5)
-        model_table = render_table(headers, model_rows, align_right=align_right)
-        lines.append(ui.panel("Models", model_table.splitlines(), color="yellow"))
-
-    session_rows: list[list[str]] = []
-    max_session_total = max((session.total_tokens for session in report.sessions.values()), default=0)
-    sorted_sessions = sorted(
-        report.sessions.values(),
-        key=lambda item: item.estimated_cost_usd if (with_cost and item.has_cost) else item.total_tokens,
-        reverse=True,
-    )[:limit]
-    for session in sorted_sessions:
-        row = [
-            format_short_datetime(session.last_seen or session.last_day),
-            session.top_model or "-",
-            format_int(session.total_tokens),
-            metric_bar(session.total_tokens, max_session_total, unicode_ok=unicode_ok),
-        ]
-        if with_cost:
-            row.append(format_cost(session.estimated_cost_usd if session.has_cost else None))
-        if not censored:
-            title = shorten_middle(session.title or session.session_id, 40)
-            row.append(title)
-        session_rows.append(row)
-    if session_rows:
-        headers = ["Last Seen", "Model", "Total", "Activity"]
-        align_right = {2}
-        if with_cost:
-            headers.append("Est. Cost")
-            align_right.add(4)
-        if not censored:
-            headers.append("Thread")
-        session_table = render_table(headers, session_rows, align_right=align_right)
-        lines.append(ui.panel("Top Sessions", session_table.splitlines(), color="magenta"))
-
+def build_notes_panel(report: UsageReport, ui: TerminalUI, *, censored: bool) -> str:
     footer_lines = [
         (
             f"Source root: {'[hidden]' if censored else report.root}"
@@ -1202,12 +1235,129 @@ def build_dashboard(
         ),
         "Estimated cost uses a local heuristic. Treat it as relative guidance, not billing truth.",
     ]
-    lines.append(ui.panel("Notes", footer_lines, color="gray"))
+    return ui.panel("Notes", footer_lines, color="gray")
+
+
+def build_overview_panels(report: UsageReport, ui: TerminalUI, *, with_cost: bool, censored: bool) -> list[str]:
+    unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
+    panels = [build_header_panel(report, ui, censored=censored), ui.cards(build_cards(report, with_cost))]
+    if report.limits is not None:
+        limit_panel = build_limit_panel(report.limits, ui, unicode_ok=unicode_ok)
+        if limit_panel is not None:
+            panels.append(limit_panel)
+    return panels
+
+
+def build_dashboard(
+    report: UsageReport,
+    ui: TerminalUI,
+    *,
+    limit: int,
+    daily_limit: int,
+    with_cost: bool,
+    censored: bool,
+) -> str:
+    unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
+    lines: list[str] = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
+
+    daily_rows = []
+    for row in build_daily_rows(report, with_cost=with_cost, limit=daily_limit, unicode_ok=unicode_ok):
+        compact = [row[0], row[1], row[5], row[4], row[7]]
+        if with_cost:
+            compact.append(row[8])
+        daily_rows.append(compact)
+    if daily_rows:
+        headers = ["Day", "Sess", "Total", "Output", "Activity"]
+        align_right = {1, 2, 3}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(5)
+        daily_table = render_table(headers, daily_rows, align_right=align_right)
+        lines.append(ui.panel("Daily", daily_table.splitlines(), color="green"))
+
+    model_rows = build_model_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
+    if model_rows:
+        headers = ["Model", "Total", "Cached", "Output", "Activity"]
+        align_right = {1, 2, 3}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(5)
+        model_table = render_table(headers, model_rows, align_right=align_right)
+        lines.append(ui.panel("Models", model_table.splitlines(), color="yellow"))
+
+    session_rows = []
+    for row in build_session_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok, censored=censored):
+        compact = [row[0], row[1], row[5], row[7]]
+        if with_cost:
+            compact.append(row[8])
+        if not censored:
+            compact.append(row[-1])
+        session_rows.append(compact)
+    if session_rows:
+        headers = ["Last Seen", "Model", "Total", "Activity"]
+        align_right = {2}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(4)
+        if not censored:
+            headers.append("Thread")
+        session_table = render_table(headers, session_rows, align_right=align_right)
+        lines.append(ui.panel("Top Sessions", session_table.splitlines(), color="magenta"))
+
+    lines.append(build_notes_panel(report, ui, censored=censored))
+    return "\n\n".join(lines)
+
+
+def render_daily_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int, censored: bool) -> str:
+    unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
+    lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
+    rows = build_daily_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
+    if rows:
+        headers = ["Day", "Sess", "Input", "Cached", "Output", "Total", "Cached%", "Activity"]
+        align_right = {1, 2, 3, 4, 5, 6}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(8)
+        lines.append(ui.panel("Daily Report", render_table(headers, rows, align_right=align_right).splitlines(), color="green"))
+    lines.append(build_notes_panel(report, ui, censored=censored))
+    return "\n\n".join(lines)
+
+
+def render_monthly_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int, censored: bool) -> str:
+    unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
+    lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
+    rows = build_monthly_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
+    if rows:
+        headers = ["Month", "Sess", "Input", "Cached", "Output", "Total", "Cached%", "Activity"]
+        align_right = {1, 2, 3, 4, 5, 6}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(8)
+        lines.append(ui.panel("Monthly Report", render_table(headers, rows, align_right=align_right).splitlines(), color="yellow"))
+    lines.append(build_notes_panel(report, ui, censored=censored))
+    return "\n\n".join(lines)
+
+
+def render_sessions_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int, censored: bool) -> str:
+    unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
+    lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
+    rows = build_session_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok, censored=censored)
+    if rows:
+        headers = ["Last Seen", "Model", "Input", "Cached", "Output", "Total", "Cached%", "Activity"]
+        align_right = {2, 3, 4, 5, 6}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(8)
+        if not censored:
+            headers.append("Thread")
+        lines.append(ui.panel("Sessions Report", render_table(headers, rows, align_right=align_right).splitlines(), color="magenta"))
+    lines.append(build_notes_panel(report, ui, censored=censored))
     return "\n\n".join(lines)
 
 
 def build_json_report(report: UsageReport, *, censored: bool) -> dict:
     return {
+        "report_type": "dashboard",
         "root": None if censored else report.root,
         "generated_at": report.generated_at,
         "window": {"since": report.since, "until": report.until},
@@ -1217,6 +1367,8 @@ def build_json_report(report: UsageReport, *, censored: bool) -> dict:
         "diagnostics": asdict(report.diagnostics),
         "daily": {key: asdict(value) for key, value in sorted(report.daily.items())},
         "daily_session_counts": report.daily_session_counts,
+        "monthly": {key: asdict(value) for key, value in sorted(report.monthly.items())},
+        "monthly_session_counts": report.monthly_session_counts,
         "models": {key: asdict(value) for key, value in sorted(report.models.items())},
         "sessions": {
             key: {
@@ -1227,6 +1379,84 @@ def build_json_report(report: UsageReport, *, censored: bool) -> dict:
             for key, value in sorted(report.sessions.items())
         },
     }
+
+
+def build_focused_json_report(
+    report: UsageReport,
+    *,
+    command: str,
+    with_cost: bool,
+    limit: int,
+    censored: bool,
+) -> dict:
+    payload = {
+        "report_type": command,
+        "root": None if censored else report.root,
+        "generated_at": report.generated_at,
+        "window": {"since": report.since, "until": report.until},
+        "summary": asdict(report.summary),
+        "plan_types": report.plan_types,
+        "limits": asdict(report.limits) if report.limits is not None else None,
+        "diagnostics": asdict(report.diagnostics),
+    }
+    if command == "daily":
+        rows = []
+        for day_key, aggregate_row in sorted(report.daily.items(), reverse=True)[:limit]:
+            item = {
+                "day": day_key,
+                "label": format_pretty_day(day_key),
+                "sessions": report.daily_session_counts.get(day_key, 0),
+                "input_tokens": aggregate_row.input_tokens,
+                "cached_input_tokens": aggregate_row.cached_input_tokens,
+                "output_tokens": aggregate_row.output_tokens,
+                "total_tokens": aggregate_row.total_tokens,
+                "cached_ratio": aggregate_row.cached_ratio,
+            }
+            if with_cost:
+                item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
+            rows.append(item)
+        payload["rows"] = rows
+        return payload
+    if command == "monthly":
+        rows = []
+        for month_key, aggregate_row in sorted(report.monthly.items(), reverse=True)[:limit]:
+            item = {
+                "month": month_key,
+                "label": format_pretty_month(month_key),
+                "sessions": report.monthly_session_counts.get(month_key, 0),
+                "input_tokens": aggregate_row.input_tokens,
+                "cached_input_tokens": aggregate_row.cached_input_tokens,
+                "output_tokens": aggregate_row.output_tokens,
+                "total_tokens": aggregate_row.total_tokens,
+                "cached_ratio": aggregate_row.cached_ratio,
+            }
+            if with_cost:
+                item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
+            rows.append(item)
+        payload["rows"] = rows
+        return payload
+    if command == "sessions":
+        rows = []
+        for session in sorted_sessions(report, with_cost=with_cost, limit=limit):
+            item = {
+                "session_id": session.session_id,
+                "title": None if censored else session.title,
+                "last_seen": session.last_seen,
+                "top_model": session.top_model,
+                "input_tokens": session.input_tokens,
+                "cached_input_tokens": session.cached_input_tokens,
+                "output_tokens": session.output_tokens,
+                "total_tokens": session.total_tokens,
+                "cached_ratio": session.cached_ratio,
+                "first_day": session.first_day,
+                "last_day": session.last_day,
+            }
+            if with_cost:
+                item["estimated_cost_usd"] = session.estimated_cost_usd if session.has_cost else None
+            rows.append(item)
+        payload["rows"] = rows
+        return payload
+    return build_json_report(report, censored=censored)
 
 
 def ui_enabled(args: argparse.Namespace) -> bool:
@@ -1253,10 +1483,46 @@ def run_once(args: argparse.Namespace, ui: TerminalUI) -> UsageReport:
 
 def render_plain_or_json(report: UsageReport, args: argparse.Namespace, ui: TerminalUI) -> str:
     if args.json:
-        return json.dumps(build_json_report(report, censored=args.censored), indent=2, sort_keys=True)
+        payload = (
+            build_json_report(report, censored=args.censored)
+            if args.command == "dashboard"
+            else build_focused_json_report(
+                report,
+                command=args.command,
+                with_cost=not args.no_cost,
+                limit=args.limit,
+                censored=args.censored,
+            )
+        )
+        return json.dumps(payload, indent=2, sort_keys=True)
 
     if report.diagnostics.parsed_events == 0 and report.limits is None:
         return "No local Codex usage found in the selected window."
+
+    if args.command == "daily":
+        return render_daily_report(
+            report,
+            ui=ui,
+            with_cost=not args.no_cost,
+            limit=args.limit,
+            censored=args.censored,
+        )
+    if args.command == "monthly":
+        return render_monthly_report(
+            report,
+            ui=ui,
+            with_cost=not args.no_cost,
+            limit=args.limit,
+            censored=args.censored,
+        )
+    if args.command == "sessions":
+        return render_sessions_report(
+            report,
+            ui=ui,
+            with_cost=not args.no_cost,
+            limit=args.limit,
+            censored=args.censored,
+        )
 
     return build_dashboard(
         report,

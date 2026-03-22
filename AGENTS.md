@@ -41,6 +41,9 @@ pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
 - `--plain` to disable ANSI colors.
 - `--censored` to hide thread titles and the local source path.
 - `--root /path/to/codex-home` to scan a different Codex home directory.
+- `daily` for day-by-day usage rows.
+- `monthly` for month-by-month usage rows.
+- `sessions` for detailed top-session output.
 
 Useful JSON extraction:
 

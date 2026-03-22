@@ -14,6 +14,7 @@ This is for users and companies that have Codex analytics turned off but still w
 
 - Offline usage reconstruction from local Codex logs.
 - Styled terminal dashboard with progress while scanning.
+- First-class `daily`, `monthly`, and `sessions` reports.
 - Experimental limit progress from local `codex.rate_limits` websocket events.
 - `--watch` mode for live refresh.
 - `--json` mode for scripting and automation.
@@ -82,6 +83,24 @@ local-codex-usage-viewer
 Scans the default Codex home directory and renders the terminal dashboard. When local limit snapshots are available in `logs_1.sqlite`, the dashboard also shows a `Limit Progress (Experimental)` panel.
 
 ```bash
+local-codex-usage-viewer daily --days 7
+```
+
+Shows a day-by-day table with sessions, tokens, cached ratio, and optional estimated cost.
+
+```bash
+local-codex-usage-viewer monthly --all
+```
+
+Shows a month-by-month table across all locally available history.
+
+```bash
+local-codex-usage-viewer sessions --days 7 --censored
+```
+
+Shows the top local sessions in the selected window. With `--censored`, thread titles stay hidden.
+
+```bash
 local-codex-usage-viewer --days 7
 ```
 
@@ -104,6 +123,12 @@ local-codex-usage-viewer --json | jq '.limits'
 ```
 
 Prints only the current experimental local limit snapshot from JSON output, which is useful when you want to inspect rate-limit progress separately from the rest of the usage report.
+
+```bash
+local-codex-usage-viewer monthly --json
+```
+
+Writes a focused machine-readable monthly report with a `rows` array instead of the full dashboard payload.
 
 ```bash
 local-codex-usage-viewer --all --no-cost

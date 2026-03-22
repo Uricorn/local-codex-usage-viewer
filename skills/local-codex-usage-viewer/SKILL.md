@@ -64,6 +64,9 @@ Useful options:
 - `--plain` to disable ANSI colors when plain terminal output is preferred.
 - `--censored` to hide thread titles and the local source path.
 - `--root /path/to/codex-home` to scan a different Codex home directory.
+- `daily` for day-by-day usage rows.
+- `monthly` for month-by-month usage rows.
+- `sessions` for detailed top-session output.
 
 Useful JSON extraction:
 
@@ -84,3 +87,4 @@ This extracts only the experimental best-effort local rate-limit snapshot when o
 7. Treat cost as heuristic only. Do not present it as billing truth.
 8. Treat limit progress as experimental best-effort local metadata from `logs_1.sqlite`, not a guarantee of server-side billing state.
 9. `--censored` does not hide limit progress because that section does not include thread titles or the local source path.
+10. Prefer `daily`, `monthly`, or `sessions` when the user wants a focused report instead of the dashboard.
