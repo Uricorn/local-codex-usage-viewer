@@ -23,7 +23,7 @@ from typing import Callable, Iterable
 
 
 VERSION = "0.1.0"
-COMMANDS = ("dashboard", "daily", "monthly", "sessions")
+COMMANDS = ("dashboard", "daily", "weekly", "monthly", "sessions")
 
 COMMAND_HELP = {
     "dashboard": {
@@ -41,6 +41,14 @@ COMMAND_HELP = {
             "{prog} daily --days 7",
             "{prog} daily --since 2026-03-01 --until 2026-03-22",
             "{prog} daily --json",
+        ],
+    },
+    "weekly": {
+        "summary": "Render a focused week-by-week usage report using local Monday-based week buckets.",
+        "examples": [
+            "{prog} weekly --days 90",
+            "{prog} weekly --all",
+            "{prog} weekly --json",
         ],
     },
     "monthly": {
@@ -213,6 +221,8 @@ class UsageReport:
     summary: Aggregate
     daily: dict[str, Aggregate]
     daily_session_counts: dict[str, int]
+    weekly: dict[str, Aggregate]
+    weekly_session_counts: dict[str, int]
     monthly: dict[str, Aggregate]
     monthly_session_counts: dict[str, int]
     models: dict[str, Aggregate]
@@ -436,12 +446,14 @@ def build_general_help_epilog(prog: str) -> str:
         "Commands:",
         "  dashboard   Full dashboard view (default)",
         "  daily       Day-by-day usage report",
+        "  weekly      Week-by-week usage report",
         "  monthly     Month-by-month usage report",
         "  sessions    Top sessions report",
         "",
         "Examples:",
         f"  {prog}",
         f"  {prog} daily --days 7",
+        f"  {prog} weekly --days 90",
         f"  {prog} monthly --all",
         f"  {prog} sessions --days 7 --censored",
         f"  {prog} help daily",
@@ -935,6 +947,11 @@ def month_from_day(day_text: str) -> str:
     return day_text[:7]
 
 
+def week_start_from_day(day_text: str) -> str:
+    parsed = date.fromisoformat(day_text)
+    return (parsed - timedelta(days=parsed.weekday())).isoformat()
+
+
 def build_report(
     root: Path,
     since: date | None,
@@ -945,10 +962,15 @@ def build_report(
     summary, daily, models, sessions = aggregate(events)
     plan_types = sorted({event.plan_type for event in events if event.plan_type})
     daily_session_sets: dict[str, set[str]] = defaultdict(set)
+    weekly: dict[str, Aggregate] = defaultdict(Aggregate)
+    weekly_session_sets: dict[str, set[str]] = defaultdict(set)
     monthly: dict[str, Aggregate] = defaultdict(Aggregate)
     monthly_session_sets: dict[str, set[str]] = defaultdict(set)
     for event in events:
         daily_session_sets[event.day].add(event.session_id)
+        week_key = week_start_from_day(event.day)
+        weekly[week_key].add(event)
+        weekly_session_sets[week_key].add(event.session_id)
         month_key = month_from_day(event.day)
         monthly[month_key].add(event)
         monthly_session_sets[month_key].add(event.session_id)
@@ -961,6 +983,8 @@ def build_report(
         summary=summary,
         daily=daily,
         daily_session_counts={day: len(session_ids) for day, session_ids in daily_session_sets.items()},
+        weekly=weekly,
+        weekly_session_counts={key: len(session_ids) for key, session_ids in weekly_session_sets.items()},
         monthly=monthly,
         monthly_session_counts={key: len(session_ids) for key, session_ids in monthly_session_sets.items()},
         models=models,
@@ -1065,6 +1089,14 @@ def format_pretty_month(month_text: str) -> str:
     except ValueError:
         return month_text
     return parsed.strftime("%b %Y")
+
+
+def format_pretty_week(week_text: str) -> str:
+    try:
+        parsed = date.fromisoformat(week_text)
+    except ValueError:
+        return week_text
+    return f"Week of {parsed.strftime('%d %b %Y')}"
 
 
 def format_window_minutes(value: int | None) -> str:
@@ -1235,6 +1267,26 @@ def build_monthly_rows(report: UsageReport, *, with_cost: bool, limit: int, unic
             format_int(aggregate_row.total_tokens),
             format_percent(aggregate_row.cached_ratio),
             metric_bar(aggregate_row.total_tokens, max_monthly_total, unicode_ok=unicode_ok),
+        ]
+        if with_cost:
+            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+        rows.append(row)
+    return rows
+
+
+def build_weekly_rows(report: UsageReport, *, with_cost: bool, limit: int, unicode_ok: bool) -> list[list[str]]:
+    rows: list[list[str]] = []
+    max_weekly_total = max((aggregate.total_tokens for aggregate in report.weekly.values()), default=0)
+    for week_key, aggregate_row in sorted(report.weekly.items(), reverse=True)[:limit]:
+        row = [
+            format_pretty_week(week_key),
+            str(report.weekly_session_counts.get(week_key, 0)),
+            format_int(aggregate_row.input_tokens),
+            format_int(aggregate_row.cached_input_tokens),
+            format_int(aggregate_row.output_tokens),
+            format_int(aggregate_row.total_tokens),
+            format_percent(aggregate_row.cached_ratio),
+            metric_bar(aggregate_row.total_tokens, max_weekly_total, unicode_ok=unicode_ok),
         ]
         if with_cost:
             row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
@@ -1450,6 +1502,21 @@ def render_monthly_report(report: UsageReport, ui: TerminalUI, *, with_cost: boo
     return "\n\n".join(lines)
 
 
+def render_weekly_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int, censored: bool) -> str:
+    unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
+    lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
+    rows = build_weekly_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
+    if rows:
+        headers = ["Week", "Sess", "Input", "Cached", "Output", "Total", "Cached%", "Activity"]
+        align_right = {1, 2, 3, 4, 5, 6}
+        if with_cost:
+            headers.append("Est. Cost")
+            align_right.add(8)
+        lines.append(ui.panel("Weekly Report", render_table(headers, rows, align_right=align_right).splitlines(), color="cyan"))
+    lines.append(build_notes_panel(report, ui, censored=censored))
+    return "\n\n".join(lines)
+
+
 def render_sessions_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int, censored: bool) -> str:
     unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
     lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
@@ -1479,6 +1546,8 @@ def build_json_report(report: UsageReport, *, censored: bool) -> dict:
         "diagnostics": asdict(report.diagnostics),
         "daily": {key: asdict(value) for key, value in sorted(report.daily.items())},
         "daily_session_counts": report.daily_session_counts,
+        "weekly": {key: asdict(value) for key, value in sorted(report.weekly.items())},
+        "weekly_session_counts": report.weekly_session_counts,
         "monthly": {key: asdict(value) for key, value in sorted(report.monthly.items())},
         "monthly_session_counts": report.monthly_session_counts,
         "models": {key: asdict(value) for key, value in sorted(report.models.items())},
@@ -1518,6 +1587,24 @@ def build_focused_json_report(
                 "day": day_key,
                 "label": format_pretty_day(day_key),
                 "sessions": report.daily_session_counts.get(day_key, 0),
+                "input_tokens": aggregate_row.input_tokens,
+                "cached_input_tokens": aggregate_row.cached_input_tokens,
+                "output_tokens": aggregate_row.output_tokens,
+                "total_tokens": aggregate_row.total_tokens,
+                "cached_ratio": aggregate_row.cached_ratio,
+            }
+            if with_cost:
+                item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
+            rows.append(item)
+        payload["rows"] = rows
+        return payload
+    if command == "weekly":
+        rows = []
+        for week_key, aggregate_row in sorted(report.weekly.items(), reverse=True)[:limit]:
+            item = {
+                "week_start": week_key,
+                "label": format_pretty_week(week_key),
+                "sessions": report.weekly_session_counts.get(week_key, 0),
                 "input_tokens": aggregate_row.input_tokens,
                 "cached_input_tokens": aggregate_row.cached_input_tokens,
                 "output_tokens": aggregate_row.output_tokens,
@@ -1613,6 +1700,14 @@ def render_plain_or_json(report: UsageReport, args: argparse.Namespace, ui: Term
 
     if args.command == "daily":
         return render_daily_report(
+            report,
+            ui=ui,
+            with_cost=not args.no_cost,
+            limit=args.limit,
+            censored=args.censored,
+        )
+    if args.command == "weekly":
+        return render_weekly_report(
             report,
             ui=ui,
             with_cost=not args.no_cost,

@@ -25,16 +25,16 @@ cuv --help
 cuv help daily
 ```
 
-If working from this repository checkout:
-
-```bash
-python3 codex_usage.py
-```
-
-For a current-shell install from this checkout:
+If working from this repository checkout and you want `cuv` available immediately:
 
 ```bash
 source ./install.sh
+```
+
+Repository-local direct-run fallback:
+
+```bash
+python3 codex_usage.py
 ```
 
 If the command is missing and installation makes sense:
@@ -57,6 +57,7 @@ That install step must be run in a terminal. A plain repo checkout does not crea
 - `--censored` to hide thread titles and the local source path.
 - `--root /path/to/codex-home` to scan a different Codex home directory.
 - `daily` for day-by-day usage rows.
+- `weekly` for week-by-week usage rows.
 - `monthly` for month-by-month usage rows.
 - `sessions` for detailed top-session output.
 

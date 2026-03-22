@@ -34,16 +34,16 @@ cuv --help
 cuv help daily
 ```
 
-Repository-local fallback:
-
-```bash
-python3 codex_usage.py
-```
-
 Current-shell install from a local checkout:
 
 ```bash
 source ./install.sh
+```
+
+Repository-local direct-run fallback:
+
+```bash
+python3 codex_usage.py
 ```
 
 If the command is missing and network access is available, install it:
@@ -80,6 +80,7 @@ Useful options:
 - `--censored` to hide thread titles and the local source path.
 - `--root /path/to/codex-home` to scan a different Codex home directory.
 - `daily` for day-by-day usage rows.
+- `weekly` for week-by-week usage rows.
 - `monthly` for month-by-month usage rows.
 - `sessions` for detailed top-session output.
 
@@ -102,4 +103,4 @@ This extracts only the experimental best-effort local rate-limit snapshot when o
 7. Treat cost as heuristic only. Do not present it as billing truth.
 8. Treat limit progress as experimental best-effort local metadata from `logs_1.sqlite`, not a guarantee of server-side billing state.
 9. `--censored` does not hide limit progress because that section does not include thread titles or the local source path.
-10. Prefer `daily`, `monthly`, or `sessions` when the user wants a focused report instead of the dashboard.
+10. Prefer `daily`, `weekly`, `monthly`, or `sessions` when the user wants a focused report instead of the dashboard.

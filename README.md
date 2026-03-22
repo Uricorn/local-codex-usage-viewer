@@ -14,7 +14,7 @@ This is for users and companies that have Codex analytics turned off but still w
 
 - Offline usage reconstruction from local Codex logs.
 - Styled terminal dashboard with progress while scanning.
-- First-class `daily`, `monthly`, and `sessions` reports.
+- First-class `daily`, `weekly`, `monthly`, and `sessions` reports.
 - Helpful CLI guidance via `--help` and `help <command>`.
 - Experimental limit progress from local `codex.rate_limits` websocket events.
 - `--watch` mode for live refresh.
@@ -31,9 +31,9 @@ This is for users and companies that have Codex analytics turned off but still w
 
 If you only cloned the repo, `cuv` will not exist yet. You must install it from a terminal, or run `python3 codex_usage.py` directly from the checkout.
 
-### Preferred: `pipx`
+### Recommended from a local clone
 
-Creates a global `cuv` command in an isolated environment.
+This is the smoothest setup if you want `cuv` working immediately in the current shell:
 
 If you do not have `pipx` yet on macOS:
 
@@ -41,6 +41,18 @@ If you do not have `pipx` yet on macOS:
 brew install pipx
 pipx ensurepath
 ```
+
+```bash
+git clone https://github.com/uricorn/local-codex-usage-viewer.git
+cd local-codex-usage-viewer
+source ./install.sh
+```
+
+That installs the tool with `pipx`, adds `~/.local/bin` to the current shell if needed, and leaves `cuv` ready to run immediately.
+
+### `pipx` from GitHub
+
+Creates a global `cuv` command in an isolated environment.
 
 ```bash
 pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
@@ -70,32 +82,6 @@ python3 -m pip install git+https://github.com/uricorn/local-codex-usage-viewer.g
 
 If the command is still not found afterwards, the Python environment's script directory is probably not on your `PATH`.
 
-### From a local clone
-
-Use this if you want to install the checked-out copy instead of GitHub.
-
-Recommended if you want current-shell auto-heal too:
-
-```bash
-git clone https://github.com/uricorn/local-codex-usage-viewer.git
-cd local-codex-usage-viewer
-source ./install.sh
-```
-
-That installs the tool with `pipx`, adds `~/.local/bin` to the current shell if needed, and leaves `cuv` ready to run immediately.
-
-If you prefer the plain install command:
-
-```bash
-pipx install .
-```
-
-Or into the current Python environment:
-
-```bash
-python3 -m pip install .
-```
-
 ### Without installing
 
 Runs directly from the checkout and does not create a shell command:
@@ -124,6 +110,12 @@ cuv daily --days 7
 ```
 
 Shows a day-by-day table with sessions, tokens, cached ratio, and optional estimated cost.
+
+```bash
+cuv weekly --days 90
+```
+
+Shows a week-by-week table using local Monday-based week buckets.
 
 ```bash
 cuv monthly --all
@@ -166,6 +158,12 @@ cuv monthly --json
 ```
 
 Writes a focused machine-readable monthly report with a `rows` array instead of the full dashboard payload.
+
+```bash
+cuv weekly --json
+```
+
+Writes a focused machine-readable weekly report with a `rows` array instead of the full dashboard payload.
 
 ```bash
 cuv --all --no-cost
