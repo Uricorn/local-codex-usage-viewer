@@ -22,11 +22,13 @@ It reads the files under `~/.codex` or `$CODEX_HOME`, rebuilds token deltas from
 
 ### Install with `pipx` from GitHub
 
+Use this if you want a clean, isolated install and a globally available `local-codex-usage-viewer` command.
+
 ```bash
 pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
 
-Then run:
+This installs the latest version from GitHub and exposes the CLI on your shell path:
 
 ```bash
 local-codex-usage-viewer
@@ -34,11 +36,15 @@ local-codex-usage-viewer
 
 ### Install with `pip` from GitHub
 
+Use this if you want the tool inside the current Python environment instead of an isolated `pipx` environment.
+
 ```bash
 python3 -m pip install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
 
 ### Install from a local clone
+
+Use this when you want to inspect the code, make changes, or install a local checkout.
 
 ```bash
 git clone https://github.com/uricorn/local-codex-usage-viewer.git
@@ -46,13 +52,15 @@ cd local-codex-usage-viewer
 pipx install .
 ```
 
-Or with `pip`:
+That installs the checked-out copy, not the GitHub remote tip. If you prefer the current Python environment instead of `pipx`:
 
 ```bash
 python3 -m pip install .
 ```
 
 ### Run without installing
+
+Use this for a one-off run directly from a checkout.
 
 ```bash
 python3 codex_usage.py
@@ -62,13 +70,45 @@ python3 codex_usage.py
 
 ```bash
 local-codex-usage-viewer
+```
+
+Scans the default Codex home directory and renders the terminal dashboard.
+
+```bash
 local-codex-usage-viewer --days 7
+```
+
+Limits the report to the last 7 days instead of the default rolling window.
+
+```bash
 local-codex-usage-viewer --watch 5
+```
+
+Refreshes the dashboard every 5 seconds so you can keep it open while working.
+
+```bash
 local-codex-usage-viewer --json > usage.json
+```
+
+Writes machine-readable JSON instead of the dashboard, which is useful for scripts and automation.
+
+```bash
 local-codex-usage-viewer --all --no-cost
+```
+
+Scans all locally available history and hides heuristic cost estimates.
+
+```bash
 local-codex-usage-viewer --censored
+```
+
+Hides thread titles and the local source path so the output is safer to share.
+
+```bash
 local-codex-usage-viewer --root /path/to/codex-home
 ```
+
+Scans a different Codex home directory instead of the default `~/.codex` or `$CODEX_HOME`.
 
 ## Output Notes
 
