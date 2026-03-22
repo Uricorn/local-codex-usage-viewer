@@ -4,7 +4,7 @@ Local Codex Usage Viewer is a small terminal tool that scans local Codex session
 
 It reads the files under `~/.codex` or `$CODEX_HOME`, rebuilds token deltas from local session JSONL logs, and renders a terminal dashboard or JSON report.
 
-![Local Codex Usage Viewer screenshot](docs/screenshot.svg)
+![Local Codex Usage Viewer screenshot](docs/screenshot.png)
 
 ## Features
 
