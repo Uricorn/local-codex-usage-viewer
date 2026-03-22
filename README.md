@@ -35,6 +35,13 @@ If you only cloned the repo, `cuv` will not exist yet. You must install it from 
 
 Creates a global `cuv` command in an isolated environment.
 
+If you do not have `pipx` yet on macOS:
+
+```bash
+brew install pipx
+pipx ensurepath
+```
+
 ```bash
 pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
