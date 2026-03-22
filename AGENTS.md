@@ -31,6 +31,12 @@ If working from this repository checkout:
 python3 codex_usage.py
 ```
 
+For a current-shell install from this checkout:
+
+```bash
+source ./install.sh
+```
+
 If the command is missing and installation makes sense:
 
 ```bash

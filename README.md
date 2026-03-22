@@ -72,11 +72,21 @@ If the command is still not found afterwards, the Python environment's script di
 
 ### From a local clone
 
-Use this if you want to install the checked-out copy instead of GitHub:
+Use this if you want to install the checked-out copy instead of GitHub.
+
+Recommended if you want current-shell auto-heal too:
 
 ```bash
 git clone https://github.com/uricorn/local-codex-usage-viewer.git
 cd local-codex-usage-viewer
+source ./install.sh
+```
+
+That installs the tool with `pipx`, adds `~/.local/bin` to the current shell if needed, and leaves `cuv` ready to run immediately.
+
+If you prefer the plain install command:
+
+```bash
 pipx install .
 ```
 

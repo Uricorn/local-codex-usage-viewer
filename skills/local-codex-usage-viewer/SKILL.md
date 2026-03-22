@@ -40,6 +40,12 @@ Repository-local fallback:
 python3 codex_usage.py
 ```
 
+Current-shell install from a local checkout:
+
+```bash
+source ./install.sh
+```
+
 If the command is missing and network access is available, install it:
 
 Preferred isolated install:
