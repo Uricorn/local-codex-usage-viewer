@@ -15,6 +15,7 @@ This is for users and companies that have Codex analytics turned off but still w
 - Offline usage reconstruction from local Codex logs.
 - Styled terminal dashboard with progress while scanning.
 - First-class `daily`, `monthly`, and `sessions` reports.
+- Helpful CLI guidance via `--help` and `help <command>`.
 - Experimental limit progress from local `codex.rate_limits` websocket events.
 - `--watch` mode for live refresh.
 - `--json` mode for scripting and automation.
@@ -81,6 +82,13 @@ local-codex-usage-viewer
 ```
 
 Scans the default Codex home directory and renders the terminal dashboard. When local limit snapshots are available in `logs_1.sqlite`, the dashboard also shows a `Limit Progress (Experimental)` panel.
+
+```bash
+local-codex-usage-viewer --help
+local-codex-usage-viewer help daily
+```
+
+Shows general CLI help or focused help for a specific report command.
 
 ```bash
 local-codex-usage-viewer daily --days 7

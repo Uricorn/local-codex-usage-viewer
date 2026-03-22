@@ -27,6 +27,13 @@ Check whether the installed command exists:
 command -v local-codex-usage-viewer
 ```
 
+Show CLI help:
+
+```bash
+local-codex-usage-viewer --help
+local-codex-usage-viewer help daily
+```
+
 Repository-local fallback:
 
 ```bash

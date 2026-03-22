@@ -23,6 +23,43 @@ from typing import Callable, Iterable
 
 
 VERSION = "0.1.0"
+COMMANDS = ("dashboard", "daily", "monthly", "sessions")
+
+COMMAND_HELP = {
+    "dashboard": {
+        "summary": "Render the full terminal dashboard with cards, daily summary, model breakdown, top sessions, and experimental limit progress.",
+        "examples": [
+            "{prog}",
+            "{prog} dashboard --days 7",
+            "{prog} dashboard --watch 5",
+            "{prog} dashboard --censored",
+        ],
+    },
+    "daily": {
+        "summary": "Render a focused day-by-day usage report with input, cached input, output, total tokens, cached ratio, and optional cost.",
+        "examples": [
+            "{prog} daily --days 7",
+            "{prog} daily --since 2026-03-01 --until 2026-03-22",
+            "{prog} daily --json",
+        ],
+    },
+    "monthly": {
+        "summary": "Render a focused month-by-month usage report across the selected local history window.",
+        "examples": [
+            "{prog} monthly --all",
+            "{prog} monthly --json",
+            "{prog} monthly --root /path/to/codex-home",
+        ],
+    },
+    "sessions": {
+        "summary": "Render a focused top-sessions report with per-session token totals and optional thread titles.",
+        "examples": [
+            "{prog} sessions --days 7",
+            "{prog} sessions --censored",
+            "{prog} sessions --json --limit 20",
+        ],
+    },
+}
 
 PRICING = {
     "gpt-5": (1.25e-6, 1e-5, 1.25e-7),
@@ -304,14 +341,15 @@ def as_bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Local Codex Usage Viewer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["dashboard", "daily", "monthly", "sessions"],
+        choices=COMMANDS,
         default="dashboard",
         help="Report type to render. Defaults to dashboard.",
     )
@@ -385,7 +423,81 @@ def parse_args() -> argparse.Namespace:
         action="version",
         version=f"%(prog)s {VERSION}",
     )
-    return parser.parse_args()
+    parser.epilog = build_general_help_epilog(parser.prog)
+    return parser
+
+
+def parse_args(parser: argparse.ArgumentParser, argv: list[str] | None = None) -> argparse.Namespace:
+    return parser.parse_args(argv)
+
+
+def build_general_help_epilog(prog: str) -> str:
+    lines = [
+        "Commands:",
+        "  dashboard   Full dashboard view (default)",
+        "  daily       Day-by-day usage report",
+        "  monthly     Month-by-month usage report",
+        "  sessions    Top sessions report",
+        "",
+        "Examples:",
+        f"  {prog}",
+        f"  {prog} daily --days 7",
+        f"  {prog} monthly --all",
+        f"  {prog} sessions --days 7 --censored",
+        f"  {prog} help daily",
+    ]
+    return "\n".join(lines)
+
+
+def print_command_help(parser: argparse.ArgumentParser, topic: str | None) -> None:
+    if topic is None:
+        parser.print_help()
+        return
+
+    command = COMMAND_HELP[topic]
+    prog = parser.prog
+    examples = "\n".join(f"  {example.format(prog=prog)}" for example in command["examples"])
+    text = "\n".join(
+        [
+            f"{prog} {topic}",
+            "",
+            command["summary"],
+            "",
+            "Examples:",
+            examples,
+            "",
+            "Common options:",
+            "  --days N                   Rolling day window",
+            "  --since YYYY-MM-DD         Inclusive start date",
+            "  --until YYYY-MM-DD         Inclusive end date",
+            "  --all                      Include all local history",
+            "  --json                     Emit machine-readable JSON",
+            "  --censored                 Hide thread titles and local path",
+            "  --no-cost                  Hide heuristic cost estimates",
+            "  --root /path/to/codex-home Scan a different Codex home",
+        ]
+    )
+    print(text)
+
+
+def maybe_handle_help_command(parser: argparse.ArgumentParser, argv: list[str]) -> bool:
+    if not argv:
+        return False
+
+    if argv[0] == "help":
+        if len(argv) > 2:
+            parser.error("help accepts at most one topic")
+        topic = argv[1] if len(argv) == 2 else None
+        if topic is not None and topic not in COMMANDS:
+            parser.error(f"unknown help topic: {topic}")
+        print_command_help(parser, topic)
+        return True
+
+    if argv[0] in COMMANDS and any(arg in ("-h", "--help") for arg in argv[1:]):
+        print_command_help(parser, argv[0])
+        return True
+
+    return False
 
 
 def parse_day(text: str) -> date:
@@ -1535,7 +1647,11 @@ def render_plain_or_json(report: UsageReport, args: argparse.Namespace, ui: Term
 
 
 def main() -> int:
-    args = parse_args()
+    parser = build_parser()
+    argv = sys.argv[1:]
+    if maybe_handle_help_command(parser, argv):
+        return 0
+    args = parse_args(parser, argv)
     ui = TerminalUI(enabled=ui_enabled(args))
 
     try:

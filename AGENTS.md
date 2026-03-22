@@ -18,6 +18,13 @@ Check whether it is already installed:
 command -v local-codex-usage-viewer
 ```
 
+Show CLI help:
+
+```bash
+local-codex-usage-viewer --help
+local-codex-usage-viewer help daily
+```
+
 If working from this repository checkout:
 
 ```bash
