@@ -29,19 +29,23 @@ This is for users and companies that have Codex analytics turned off but still w
 
 ## Installation
 
-If you only cloned the repo, `cuv` will not exist yet. You must either install it with one of the terminal commands below, or run `python3 codex_usage.py` directly from the checkout.
+If you only cloned the repo, `cuv` will not exist yet. You must install it from a terminal, or run `python3 codex_usage.py` directly from the checkout.
 
-### Install with `pipx` from GitHub
+### Preferred: `pipx`
 
-Run these commands in your terminal. This step installs the tool and creates a shell command on your `PATH`.
-
-Use this if you want a clean, isolated install and a globally available `cuv` command.
+Creates a global `cuv` command in an isolated environment.
 
 ```bash
 pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
 
-If this is your first `pipx` install and the command is still not found afterwards, run:
+Then run:
+
+```bash
+cuv
+```
+
+If `cuv` is still not found afterwards:
 
 ```bash
 pipx ensurepath
@@ -49,24 +53,9 @@ pipx ensurepath
 
 Then open a new terminal, or run `hash -r` in your current shell.
 
-This installs the latest version from GitHub and exposes the CLI on your shell path:
+### Fallback: `pip`
 
-```bash
-cuv
-```
-
-The older aliases still work too:
-
-```bash
-codex-usage
-local-codex-usage-viewer
-```
-
-### Install with `pip` from GitHub
-
-Use this if you want the tool inside the current Python environment instead of an isolated `pipx` environment.
-
-Run these commands in your terminal. They install the package into that Python environment and expose its console scripts there.
+Installs into the current Python environment.
 
 ```bash
 python3 -m pip install git+https://github.com/uricorn/local-codex-usage-viewer.git
@@ -74,11 +63,9 @@ python3 -m pip install git+https://github.com/uricorn/local-codex-usage-viewer.g
 
 If the command is still not found afterwards, the Python environment's script directory is probably not on your `PATH`.
 
-### Install from a local clone
+### From a local clone
 
-Use this when you want to inspect the code, make changes, or install a local checkout.
-
-Run these commands in your terminal from the directory where you want the repo cloned.
+Use this if you want to install the checked-out copy instead of GitHub:
 
 ```bash
 git clone https://github.com/uricorn/local-codex-usage-viewer.git
@@ -86,15 +73,15 @@ cd local-codex-usage-viewer
 pipx install .
 ```
 
-That installs the checked-out copy, not the GitHub remote tip. If you prefer the current Python environment instead of `pipx`:
+Or into the current Python environment:
 
 ```bash
 python3 -m pip install .
 ```
 
-### Run without installing
+### Without installing
 
-Use this for a one-off run directly from a checkout. This does not create a shell command, it just runs the script directly.
+Runs directly from the checkout and does not create a shell command:
 
 ```bash
 python3 codex_usage.py
