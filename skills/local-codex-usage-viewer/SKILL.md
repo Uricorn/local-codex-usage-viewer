@@ -45,10 +45,10 @@ If `pipx` is unavailable, install it into the current Python environment:
 python3 -m pip install git+https://github.com/uricorn/local-codex-usage-viewer.git
 ```
 
-If you are already inside a repository checkout, no install is required. Use:
+If you want the skill itself in Codex, copy or install this directory into:
 
-```bash
-python3 codex_usage.py
+```text
+$CODEX_HOME/skills/local-codex-usage-viewer
 ```
 
 Useful options:

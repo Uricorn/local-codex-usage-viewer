@@ -118,15 +118,27 @@ Scans a different Codex home directory instead of the default `~/.codex` or `$CO
 - The dashboard is useful for observability and rough comparisons, not billing reconciliation.
 - `--censored` removes thread titles and hides the local source path from terminal and JSON output.
 
-## Agent Skill
+## Codex Integration
 
-This repository includes a project skill at:
+For repository-local Codex behavior, see:
 
 ```text
-.cursor/skills/local-codex-usage-viewer/SKILL.md
+AGENTS.md
 ```
 
-It gives agents a standard way to run the viewer for local Codex usage questions.
+For an installable Codex skill, this repository includes:
+
+```text
+skills/local-codex-usage-viewer/SKILL.md
+```
+
+To install that skill into Codex, place it under:
+
+```text
+$CODEX_HOME/skills/local-codex-usage-viewer
+```
+
+That gives Codex a reusable skill for local usage questions even outside this repository.
 
 ## Credit
 
