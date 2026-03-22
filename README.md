@@ -6,6 +6,10 @@ It reads the files under `~/.codex` or `$CODEX_HOME`, rebuilds token deltas from
 
 ![Local Codex Usage Viewer screenshot](docs/screenshot.png)
 
+## Who Is This For?
+
+This is for users and companies that have Codex analytics turned off but still want to track usage in a private, local-only way from Codex logs.
+
 ## Features
 
 - Offline usage reconstruction from local Codex logs.
