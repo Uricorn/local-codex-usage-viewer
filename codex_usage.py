@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import time
 from collections import defaultdict
@@ -139,6 +140,34 @@ class ScanDiagnostics:
 
 
 @dataclass
+class LimitWindow:
+    used_percent: float | None = None
+    window_minutes: int | None = None
+    reset_after_seconds: int | None = None
+    reset_at: str | None = None
+
+
+@dataclass
+class LimitBucket:
+    allowed: bool | None = None
+    limit_reached: bool | None = None
+    primary: LimitWindow | None = None
+    secondary: LimitWindow | None = None
+
+
+@dataclass
+class LimitSnapshot:
+    captured_at: str | None = None
+    plan_type: str | None = None
+    credits_has_credits: bool | None = None
+    credits_unlimited: bool | None = None
+    credits_balance: float | None = None
+    standard: LimitBucket | None = None
+    code_review: LimitBucket | None = None
+    additional: dict[str, LimitBucket] = field(default_factory=dict)
+
+
+@dataclass
 class UsageReport:
     root: str
     generated_at: str
@@ -150,6 +179,7 @@ class UsageReport:
     models: dict[str, Aggregate]
     sessions: dict[str, SessionAggregate]
     plan_types: list[str]
+    limits: LimitSnapshot | None
     diagnostics: ScanDiagnostics
 
 
@@ -250,6 +280,26 @@ def default_codex_home() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".codex"
+
+
+def as_int(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    return 0
+
+
+def as_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def as_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def parse_args() -> argparse.Namespace:
@@ -406,6 +456,118 @@ def load_session_index(root: Path) -> dict[str, dict]:
     return mapping
 
 
+def load_limit_snapshot(root: Path) -> LimitSnapshot | None:
+    db_path = root / "logs_1.sqlite"
+    if not db_path.is_file():
+        return None
+
+    query = """
+        SELECT ts, feedback_log_body
+        FROM logs
+        WHERE target = 'codex_api::endpoint::responses_websocket'
+          AND feedback_log_body LIKE '%websocket event: {"type":"codex.rate_limits"%'
+        ORDER BY ts DESC, ts_nanos DESC, id DESC
+        LIMIT 25
+    """
+    prefix = "websocket event: "
+
+    try:
+        connection = sqlite3.connect(str(db_path))
+        try:
+            rows = connection.execute(query).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+
+    for ts, body in rows:
+        if not body or prefix not in body:
+            continue
+        raw_payload = body.split(prefix, 1)[1].strip()
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("type") != "codex.rate_limits":
+            continue
+
+        credits = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
+        additional_payload = (
+            payload.get("additional_rate_limits")
+            if isinstance(payload.get("additional_rate_limits"), dict)
+            else {}
+        )
+        additional: dict[str, LimitBucket] = {}
+        for name, item in additional_payload.items():
+            bucket = parse_limit_bucket(item)
+            if bucket is not None:
+                additional[name] = bucket
+
+        snapshot = LimitSnapshot(
+            captured_at=epoch_to_local_timestamp(ts),
+            plan_type=payload.get("plan_type") if isinstance(payload.get("plan_type"), str) else None,
+            credits_has_credits=as_bool(credits.get("has_credits")),
+            credits_unlimited=as_bool(credits.get("unlimited")),
+            credits_balance=as_float(credits.get("balance")),
+            standard=parse_limit_bucket(payload.get("rate_limits")),
+            code_review=parse_limit_bucket(payload.get("code_review_rate_limits")),
+            additional=additional,
+        )
+        if has_limit_snapshot_data(snapshot):
+            return snapshot
+
+    return None
+
+
+def has_limit_snapshot_data(snapshot: LimitSnapshot) -> bool:
+    return any(
+        [
+            snapshot.plan_type,
+            snapshot.standard,
+            snapshot.code_review,
+            snapshot.additional,
+            snapshot.credits_has_credits is not None,
+            snapshot.credits_unlimited is not None,
+            snapshot.credits_balance is not None,
+        ]
+    )
+
+
+def parse_limit_bucket(payload: object) -> LimitBucket | None:
+    if not isinstance(payload, dict):
+        return None
+    bucket = LimitBucket(
+        allowed=as_bool(payload.get("allowed")),
+        limit_reached=as_bool(payload.get("limit_reached")),
+        primary=parse_limit_window(payload.get("primary")),
+        secondary=parse_limit_window(payload.get("secondary")),
+    )
+    if any([bucket.allowed is not None, bucket.limit_reached is not None, bucket.primary, bucket.secondary]):
+        return bucket
+    return None
+
+
+def parse_limit_window(payload: object) -> LimitWindow | None:
+    if not isinstance(payload, dict):
+        return None
+    window = LimitWindow(
+        used_percent=as_float(payload.get("used_percent")),
+        window_minutes=as_int(payload.get("window_minutes")) or None,
+        reset_after_seconds=as_int(payload.get("reset_after_seconds")) or None,
+        reset_at=epoch_to_local_timestamp(payload.get("reset_at")),
+    )
+    if any(
+        [
+            window.used_percent is not None,
+            window.window_minutes is not None,
+            window.reset_after_seconds is not None,
+            window.reset_at is not None,
+        ]
+    ):
+        return window
+    return None
+
+
 def normalize_model(raw: str | None) -> str:
     if not raw:
         return "unknown"
@@ -432,6 +594,15 @@ def estimate_cost(model: str, input_tokens: int, cached_input_tokens: int, outpu
 def parse_local_day(timestamp: str) -> str | None:
     parsed = parse_local_timestamp(timestamp)
     return parsed.date().isoformat() if parsed else None
+
+
+def epoch_to_local_timestamp(timestamp: object) -> str | None:
+    if isinstance(timestamp, bool):
+        return None
+    if not isinstance(timestamp, (int, float)):
+        return None
+    parsed = datetime.fromtimestamp(int(timestamp), tz=timezone.utc).astimezone()
+    return parsed.isoformat(timespec="seconds")
 
 
 def parse_local_timestamp(timestamp: str) -> datetime | None:
@@ -563,13 +734,6 @@ def token_delta(
     last_usage: dict,
     previous_totals: tuple[int, int, int] | None,
 ) -> tuple[int, int, int, tuple[int, int, int] | None]:
-    def as_int(value: object) -> int:
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, (int, float)):
-            return int(value)
-        return 0
-
     if total_usage:
         input_total = as_int(total_usage.get("input_tokens"))
         cached_total = as_int(total_usage.get("cached_input_tokens", total_usage.get("cache_read_input_tokens")))
@@ -658,6 +822,7 @@ def build_report(
     daily_session_sets: dict[str, set[str]] = defaultdict(set)
     for event in events:
         daily_session_sets[event.day].add(event.session_id)
+    limits = load_limit_snapshot(root)
     return UsageReport(
         root=str(root),
         generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -669,6 +834,7 @@ def build_report(
         models=models,
         sessions=sessions,
         plan_types=plan_types,
+        limits=limits,
         diagnostics=diagnostics,
     )
 
@@ -761,10 +927,47 @@ def format_pretty_day(day_text: str) -> str:
     return parsed.strftime("%a %d %b")
 
 
+def format_window_minutes(value: int | None) -> str:
+    if value is None:
+        return "-"
+    if value % (60 * 24) == 0:
+        return f"{value // (60 * 24)}d"
+    if value % 60 == 0:
+        return f"{value // 60}h"
+    return f"{value}m"
+
+
+def format_relative_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "-"
+    if seconds <= 0:
+        return "now"
+    days, remainder = divmod(seconds, 60 * 60 * 24)
+    hours, remainder = divmod(remainder, 60 * 60)
+    minutes = remainder // 60
+    if days > 0:
+        return f"in {days}d"
+    if hours > 0:
+        return f"in {hours}h"
+    if minutes > 0:
+        return f"in {minutes}m"
+    return "in <1m"
+
+
 def metric_bar(value: int, maximum: int, width: int = 14, unicode_ok: bool = True) -> str:
     if maximum <= 0:
         return "-" * width
     filled = max(0, min(width, round(width * (value / maximum))))
+    full = "█" if unicode_ok else "#"
+    empty = "░" if unicode_ok else "."
+    return full * filled + empty * (width - filled)
+
+
+def percent_bar(value: float | None, width: int = 14, unicode_ok: bool = True) -> str:
+    if value is None:
+        return "-" * width
+    clamped = max(0.0, min(100.0, value))
+    filled = max(0, min(width, round(width * (clamped / 100.0))))
     full = "█" if unicode_ok else "#"
     empty = "░" if unicode_ok else "."
     return full * filled + empty * (width - filled)
@@ -791,6 +994,63 @@ def render_table(headers: list[str], rows: list[list[str]], align_right: set[int
 
     divider = render_row(["-" * width for width in widths])
     return "\n".join([render_row(headers), divider, *[render_row(row) for row in rows]])
+
+
+def build_limit_panel(snapshot: LimitSnapshot, ui: TerminalUI, *, unicode_ok: bool) -> str | None:
+    rows: list[list[str]] = []
+
+    def append_rows(label: str, bucket: LimitBucket | None) -> None:
+        if bucket is None:
+            return
+        status_suffix = ""
+        if bucket.allowed is False:
+            status_suffix = " (blocked)"
+        elif bucket.limit_reached:
+            status_suffix = " (reached)"
+        for tier_name, window in (("Primary", bucket.primary), ("Secondary", bucket.secondary)):
+            if window is None:
+                continue
+            rows.append(
+                [
+                    shorten_middle(f"{label}{status_suffix}", 34),
+                    tier_name,
+                    format_percent(window.used_percent / 100.0) if window.used_percent is not None else "-",
+                    percent_bar(window.used_percent, unicode_ok=unicode_ok),
+                    format_window_minutes(window.window_minutes),
+                    format_relative_duration(window.reset_after_seconds),
+                ]
+            )
+
+    append_rows("Standard", snapshot.standard)
+    append_rows("Code Review", snapshot.code_review)
+    for name, bucket in sorted(snapshot.additional.items()):
+        append_rows(name, bucket)
+
+    if not rows:
+        return None
+
+    status_bits: list[str] = []
+    if snapshot.plan_type:
+        status_bits.append(f"Plan: {snapshot.plan_type}")
+    if snapshot.credits_has_credits is not None:
+        status_bits.append(f"Credits: {'yes' if snapshot.credits_has_credits else 'no'}")
+    if snapshot.credits_unlimited is not None:
+        status_bits.append(f"Unlimited: {'yes' if snapshot.credits_unlimited else 'no'}")
+    if snapshot.credits_balance is not None:
+        status_bits.append(f"Balance: {snapshot.credits_balance:g}")
+
+    lines: list[str] = []
+    if snapshot.captured_at:
+        lines.append(f"Snapshot: {format_pretty_datetime(snapshot.captured_at)}")
+    if status_bits:
+        lines.append(" • ".join(status_bits))
+    limit_table = render_table(
+        ["Scope", "Tier", "Used", "Progress", "Window", "Reset"],
+        rows,
+        align_right={2},
+    )
+    lines.extend(limit_table.splitlines())
+    return ui.panel("Limit Progress (Experimental)", lines, color="red")
 
 
 def window_label(report: UsageReport) -> str:
@@ -843,6 +1103,11 @@ def build_dashboard(
         header_lines.append("Privacy: thread titles hidden")
     lines.append(ui.panel("Local Codex Usage Viewer", header_lines, color="cyan"))
     lines.append(ui.cards(build_cards(report, with_cost)))
+
+    if report.limits is not None:
+        limit_panel = build_limit_panel(report.limits, ui, unicode_ok=unicode_ok)
+        if limit_panel is not None:
+            lines.append(limit_panel)
 
     daily_rows: list[list[str]] = []
     max_daily_total = max((aggregate.total_tokens for aggregate in report.daily.values()), default=0)
@@ -930,6 +1195,11 @@ def build_dashboard(
             f" • invalid lines: {report.diagnostics.invalid_lines}"
             f" • empty sessions: {report.diagnostics.empty_sessions}"
         ),
+        (
+            "Limit progress is experimental and uses best-effort local codex.rate_limits websocket events."
+            if report.limits is not None
+            else "No local rate-limit snapshot found."
+        ),
         "Estimated cost uses a local heuristic. Treat it as relative guidance, not billing truth.",
     ]
     lines.append(ui.panel("Notes", footer_lines, color="gray"))
@@ -943,6 +1213,7 @@ def build_json_report(report: UsageReport, *, censored: bool) -> dict:
         "window": {"since": report.since, "until": report.until},
         "summary": asdict(report.summary),
         "plan_types": report.plan_types,
+        "limits": asdict(report.limits) if report.limits is not None else None,
         "diagnostics": asdict(report.diagnostics),
         "daily": {key: asdict(value) for key, value in sorted(report.daily.items())},
         "daily_session_counts": report.daily_session_counts,
@@ -984,7 +1255,7 @@ def render_plain_or_json(report: UsageReport, args: argparse.Namespace, ui: Term
     if args.json:
         return json.dumps(build_json_report(report, censored=args.censored), indent=2, sort_keys=True)
 
-    if report.diagnostics.parsed_events == 0:
+    if report.diagnostics.parsed_events == 0 and report.limits is None:
         return "No local Codex usage found in the selected window."
 
     return build_dashboard(

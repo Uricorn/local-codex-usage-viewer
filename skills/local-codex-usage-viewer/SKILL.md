@@ -10,6 +10,7 @@ description: Inspect local Codex usage logs and render offline summaries. Use wh
 - The user asks for local token counts, session summaries, model usage, or rough cost estimates.
 - The user wants a privacy-safe report to share with others.
 - The user wants structured JSON output for post-processing or automation.
+- The user wants to inspect local Codex rate-limit progress without relying on hosted analytics.
 
 ## Commands
 
@@ -63,6 +64,14 @@ Useful options:
 - `--censored` to hide thread titles and the local source path.
 - `--root /path/to/codex-home` to scan a different Codex home directory.
 
+Useful JSON extraction:
+
+```bash
+local-codex-usage-viewer --json | jq '.limits'
+```
+
+This extracts only the experimental best-effort local rate-limit snapshot when one is present.
+
 ## Agent Guidance
 
 1. Before assuming the tool is unavailable, check `command -v local-codex-usage-viewer`.
@@ -72,3 +81,5 @@ Useful options:
 5. Use `--censored` before sharing output that could expose thread titles or the local Codex home path.
 6. Use `--no-cost` when the user only wants activity, not a pricing estimate.
 7. Treat cost as heuristic only. Do not present it as billing truth.
+8. Treat limit progress as experimental best-effort local metadata from `logs_1.sqlite`, not a guarantee of server-side billing state.
+9. `--censored` does not hide limit progress because that section does not include thread titles or the local source path.

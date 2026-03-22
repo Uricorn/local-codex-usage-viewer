@@ -10,6 +10,7 @@ It reads the files under `~/.codex` or `$CODEX_HOME`, rebuilds token deltas from
 
 - Offline usage reconstruction from local Codex logs.
 - Styled terminal dashboard with progress while scanning.
+- Experimental limit progress from local `codex.rate_limits` websocket events.
 - `--watch` mode for live refresh.
 - `--json` mode for scripting and automation.
 - `--censored` mode to hide thread titles.
@@ -74,7 +75,7 @@ python3 codex_usage.py
 local-codex-usage-viewer
 ```
 
-Scans the default Codex home directory and renders the terminal dashboard.
+Scans the default Codex home directory and renders the terminal dashboard. When local limit snapshots are available in `logs_1.sqlite`, the dashboard also shows a `Limit Progress (Experimental)` panel.
 
 ```bash
 local-codex-usage-viewer --days 7
@@ -92,7 +93,13 @@ Refreshes the dashboard every 5 seconds so you can keep it open while working.
 local-codex-usage-viewer --json > usage.json
 ```
 
-Writes machine-readable JSON instead of the dashboard, which is useful for scripts and automation.
+Writes machine-readable JSON instead of the dashboard, which is useful for scripts and automation. The JSON includes a top-level `limits` object when a local rate-limit snapshot is available.
+
+```bash
+local-codex-usage-viewer --json | jq '.limits'
+```
+
+Prints only the current experimental local limit snapshot from JSON output, which is useful when you want to inspect rate-limit progress separately from the rest of the usage report.
 
 ```bash
 local-codex-usage-viewer --all --no-cost
@@ -104,7 +111,7 @@ Scans all locally available history and hides heuristic cost estimates.
 local-codex-usage-viewer --censored
 ```
 
-Hides thread titles and the local source path so the output is safer to share.
+Hides thread titles and the local source path so the output is safer to share. Limit progress stays visible because it comes from local rate-limit metadata, not thread text.
 
 ```bash
 local-codex-usage-viewer --root /path/to/codex-home
@@ -115,6 +122,8 @@ Scans a different Codex home directory instead of the default `~/.codex` or `$CO
 ## Output Notes
 
 - Estimated cost is heuristic-only.
+- Limit progress is experimental, best-effort, and comes from local `codex.rate_limits` websocket events in `logs_1.sqlite`.
+- Limit progress may be missing if the local logs do not contain a recent rate-limit snapshot.
 - The dashboard is useful for observability and rough comparisons, not billing reconciliation.
 - `--censored` removes thread titles and hides the local source path from terminal and JSON output.
 
