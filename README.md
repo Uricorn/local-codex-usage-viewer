@@ -20,7 +20,7 @@ This is for users and companies that have Codex analytics turned off but still w
 - `--watch` mode for live refresh.
 - `--json` mode for scripting and automation.
 - `--censored` mode to hide thread titles.
-- Model breakdowns, session summaries, daily usage, and heuristic cost estimates.
+- Model breakdowns, session summaries, daily usage, heuristic cost estimates, and a rough energy/tree-offset signal.
 
 ## Requirements
 
@@ -109,7 +109,7 @@ Shows general CLI help or focused help for a specific report command.
 cuv daily --days 7
 ```
 
-Shows a day-by-day table with sessions, tokens, cached ratio, and optional estimated cost.
+Shows a day-by-day table with sessions, tokens, cached ratio, and optional estimated cost. The dashboard summary cards also include estimated energy and a friendly tree-offset equivalent.
 
 ```bash
 cuv weekly --days 90
@@ -186,10 +186,37 @@ Scans a different Codex home directory instead of the default `~/.codex` or `$CO
 ## Output Notes
 
 - Estimated cost is heuristic-only.
+- Estimated energy and tree offset are heuristic-only.
 - Limit progress is experimental, best-effort, and comes from local `codex.rate_limits` websocket events in `logs_1.sqlite`.
 - Limit progress may be missing if the local logs do not contain a recent rate-limit snapshot.
 - The dashboard is useful for observability and rough comparisons, not billing reconciliation.
 - `--censored` removes thread titles and hides the local source path from terminal and JSON output.
+
+### Energy Heuristic Footnote
+
+The energy card is intentionally rough. It is a token-weighted estimate, not a wall-power measurement:
+
+```text
+estimated_energy_wh =
+  (non_cached_input_tokens * input_rate_wh)
+  + (cached_input_tokens * cached_rate_wh)
+  + (output_tokens * output_rate_wh)
+```
+
+Current default rates are:
+
+- `input_rate_wh = 0.00025`
+- `cached_rate_wh = 0.000025`
+- `output_rate_wh = 0.00075`
+
+The model multiplier then adjusts those base rates by family, with smaller models discounted and `pro`-tier models weighted higher.
+
+The friendly tree equivalent converts the energy estimate into a rough offset time using:
+
+- `400 gCO2e / kWh` grid intensity
+- `22 kgCO2e / year` absorbed by one mature tree
+
+This should be read as a rough relative signal for "more vs. less", not a literal environmental accounting figure.
 
 ## Codex Integration
 

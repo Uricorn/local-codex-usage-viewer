@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 COMMANDS = ("dashboard", "daily", "weekly", "monthly", "sessions")
 
 COMMAND_HELP = {
@@ -91,6 +91,33 @@ PRICING = {
     "gpt-5.4-pro": (3e-5, 1.8e-4, None),
 }
 
+# Energy heuristic rates are intentionally rough. They provide a consistent
+# relative signal from local token counts rather than a wall-power measurement.
+BASE_ENERGY_RATES_WH = (2.5e-4, 7.5e-4, 2.5e-5)
+MODEL_ENERGY_MULTIPLIER = {
+    "gpt-5": 1.0,
+    "gpt-5-codex": 1.0,
+    "gpt-5-mini": 0.35,
+    "gpt-5-nano": 0.12,
+    "gpt-5-pro": 1.6,
+    "gpt-5.1": 1.0,
+    "gpt-5.1-codex": 1.0,
+    "gpt-5.1-codex-max": 1.1,
+    "gpt-5.1-codex-mini": 0.35,
+    "gpt-5.2": 1.05,
+    "gpt-5.2-codex": 1.05,
+    "gpt-5.2-pro": 1.65,
+    "gpt-5.3-codex": 1.05,
+    "gpt-5.3-codex-spark": 0.2,
+    "gpt-5.3-codex-spark-preview": 0.2,
+    "gpt-5.4": 1.1,
+    "gpt-5.4-mini": 0.4,
+    "gpt-5.4-nano": 0.15,
+    "gpt-5.4-pro": 1.75,
+}
+DEFAULT_GRID_INTENSITY_G_CO2E_PER_KWH = 400.0
+TREE_ABSORPTION_G_CO2E_PER_YEAR = 22_000.0
+
 MODEL_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 SESSION_ID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
@@ -110,6 +137,7 @@ class UsageEvent:
     cached_input_tokens: int
     output_tokens: int
     plan_type: str | None
+    estimated_energy_wh: float
     estimated_cost_usd: float | None
 
     @property
@@ -123,6 +151,7 @@ class Aggregate:
     cached_input_tokens: int = 0
     output_tokens: int = 0
     events: int = 0
+    estimated_energy_wh: float = 0.0
     estimated_cost_usd: float = 0.0
     has_cost: bool = False
 
@@ -136,11 +165,23 @@ class Aggregate:
             return 0.0
         return self.cached_input_tokens / self.input_tokens
 
+    @property
+    def estimated_emissions_g_co2e(self) -> float:
+        return (self.estimated_energy_wh / 1000.0) * DEFAULT_GRID_INTENSITY_G_CO2E_PER_KWH
+
+    @property
+    def tree_offset_hours(self) -> float:
+        tree_absorption_per_hour = TREE_ABSORPTION_G_CO2E_PER_YEAR / (365.0 * 24.0)
+        if tree_absorption_per_hour <= 0:
+            return 0.0
+        return self.estimated_emissions_g_co2e / tree_absorption_per_hour
+
     def add(self, event: UsageEvent) -> None:
         self.input_tokens += event.input_tokens
         self.cached_input_tokens += event.cached_input_tokens
         self.output_tokens += event.output_tokens
         self.events += 1
+        self.estimated_energy_wh += event.estimated_energy_wh
         if event.estimated_cost_usd is not None:
             self.estimated_cost_usd += event.estimated_cost_usd
             self.has_cost = True
@@ -233,6 +274,7 @@ class UsageReport:
 
 
 class TerminalUI:
+    MAX_CARD_COLUMNS = 4
     COLORS = {
         "reset": "\033[0m",
         "bold": "\033[1m",
@@ -298,7 +340,7 @@ class TerminalUI:
             return ""
         term_width = shutil.get_terminal_size((100, 24)).columns
         card_width = 24
-        columns = max(1, min(len(cards), term_width // (card_width + 2)))
+        columns = max(1, min(len(cards), self.MAX_CARD_COLUMNS, term_width // (card_width + 2)))
         rendered = [self._card(*card, width=card_width) for card in cards]
         rows = []
         for start in range(0, len(rendered), columns):
@@ -724,6 +766,14 @@ def estimate_cost(model: str, input_tokens: int, cached_input_tokens: int, outpu
     return non_cached * input_rate + cached * cache_read_rate + output_tokens * output_rate
 
 
+def estimate_energy(model: str, input_tokens: int, cached_input_tokens: int, output_tokens: int) -> float:
+    multiplier = MODEL_ENERGY_MULTIPLIER.get(normalize_model(model), 1.0)
+    input_rate, output_rate, cached_rate = (rate * multiplier for rate in BASE_ENERGY_RATES_WH)
+    cached = max(0, min(cached_input_tokens, input_tokens))
+    non_cached = max(0, input_tokens - cached)
+    return (non_cached * input_rate) + (cached * cached_rate) + (output_tokens * output_rate)
+
+
 def parse_local_day(timestamp: str) -> str | None:
     parsed = parse_local_timestamp(timestamp)
     return parsed.date().isoformat() if parsed else None
@@ -840,6 +890,7 @@ def parse_session_file(
             effective_session_id = session_id or fallback_session_id(path)
             session_title = (session_index.get(effective_session_id) or {}).get("thread_name")
             normalized_model = normalize_model(model)
+            estimated_energy = estimate_energy(normalized_model, input_delta, cached_delta, output_delta)
             estimated = None if not with_cost else estimate_cost(normalized_model, input_delta, cached_delta, output_delta)
             events.append(
                 UsageEvent(
@@ -852,6 +903,7 @@ def parse_session_file(
                     cached_input_tokens=cached_delta,
                     output_tokens=output_delta,
                     plan_type=plan_type,
+                    estimated_energy_wh=estimated_energy,
                     estimated_cost_usd=estimated,
                 )
             )
@@ -1014,6 +1066,48 @@ def format_cost(value: float | None) -> str:
     if value is None:
         return "-"
     return f"${value:,.2f}"
+
+
+def format_energy(value: float) -> str:
+    if value >= 1000:
+        return f"{value / 1000:.2f} kWh"
+    if value >= 10:
+        return f"{value:.1f} Wh"
+    if value >= 1:
+        return f"{value:.2f} Wh"
+    return f"{value * 1000:.0f} mWh"
+
+
+def format_energy_compact(value: float) -> str:
+    if value >= 1000:
+        return f"{value / 1000:.1f}kWh"
+    if value >= 1:
+        return f"{value:.0f}Wh"
+    return f"{value * 1000:.0f}mWh"
+
+
+def format_tree_offset(hours: float) -> str:
+    if hours < (1 / 60):
+        return f"{hours * 3600:.0f} tree-sec"
+    if hours < 1:
+        return f"{hours * 60:.0f} tree-min"
+    if hours < 24:
+        return f"{hours:.1f} tree-hours"
+    if hours < 24 * 30:
+        return f"{hours / 24:.1f} tree-days"
+    return f"{hours / (24 * 30):.1f} tree-months"
+
+
+def format_tree_offset_compact(hours: float) -> str:
+    if hours < (1 / 60):
+        return f"{hours * 3600:.0f}s"
+    if hours < 1:
+        return f"{hours * 60:.0f}m"
+    if hours < 24:
+        return f"{hours:.1f}h"
+    if hours < 24 * 30:
+        return f"{hours / 24:.1f}d"
+    return f"{hours / (24 * 30):.1f}mo"
 
 
 def format_percent(value: float) -> str:
@@ -1245,6 +1339,8 @@ def build_daily_rows(report: UsageReport, *, with_cost: bool, limit: int, unicod
             format_int(aggregate_row.cached_input_tokens),
             format_int(aggregate_row.output_tokens),
             format_int(aggregate_row.total_tokens),
+            format_energy_compact(aggregate_row.estimated_energy_wh),
+            format_tree_offset_compact(aggregate_row.tree_offset_hours),
             format_percent(aggregate_row.cached_ratio),
             metric_bar(aggregate_row.total_tokens, max_daily_total, unicode_ok=unicode_ok),
         ]
@@ -1265,6 +1361,8 @@ def build_monthly_rows(report: UsageReport, *, with_cost: bool, limit: int, unic
             format_int(aggregate_row.cached_input_tokens),
             format_int(aggregate_row.output_tokens),
             format_int(aggregate_row.total_tokens),
+            format_energy_compact(aggregate_row.estimated_energy_wh),
+            format_tree_offset_compact(aggregate_row.tree_offset_hours),
             format_percent(aggregate_row.cached_ratio),
             metric_bar(aggregate_row.total_tokens, max_monthly_total, unicode_ok=unicode_ok),
         ]
@@ -1285,6 +1383,8 @@ def build_weekly_rows(report: UsageReport, *, with_cost: bool, limit: int, unico
             format_int(aggregate_row.cached_input_tokens),
             format_int(aggregate_row.output_tokens),
             format_int(aggregate_row.total_tokens),
+            format_energy_compact(aggregate_row.estimated_energy_wh),
+            format_tree_offset_compact(aggregate_row.tree_offset_hours),
             format_percent(aggregate_row.cached_ratio),
             metric_bar(aggregate_row.total_tokens, max_weekly_total, unicode_ok=unicode_ok),
         ]
@@ -1359,6 +1459,8 @@ def build_cards(report: UsageReport, with_cost: bool) -> list[tuple[str, str, st
         ("Active Days", format_int(len(report.daily)), "days with usage", "cyan"),
         ("Total Tokens", format_compact_int(report.summary.total_tokens), "input + output", "green"),
         ("Cached Ratio", format_percent(report.summary.cached_ratio), "cached / input", "yellow"),
+        ("Est. Energy", format_energy(report.summary.estimated_energy_wh), "token heuristic", "red"),
+        ("Tree Offset", format_tree_offset(report.summary.tree_offset_hours), "one tree absorbing CO2", "green"),
     ]
     if with_cost:
         cost_value = format_cost(report.summary.estimated_cost_usd if report.summary.has_cost else None)
@@ -1397,6 +1499,10 @@ def build_notes_panel(report: UsageReport, ui: TerminalUI, *, censored: bool) ->
             if report.limits is not None
             else "No local rate-limit snapshot found."
         ),
+        (
+            "Energy and tree offset use a token-weighted heuristic."
+            " They are not wall-power measurements."
+        ),
         "Estimated cost uses a local heuristic. Treat it as relative guidance, not billing truth.",
     ]
     return ui.panel("Notes", footer_lines, color="gray")
@@ -1424,15 +1530,15 @@ def build_compact_period_panel(
         return None
     compact_rows = []
     for row in rows:
-        compact = [row[0], row[1], row[5], row[4], row[7]]
+        compact = [row[0], row[1], row[5], row[4], row[6], row[7], row[9]]
         if with_cost:
-            compact.append(row[8])
+            compact.append(row[10])
         compact_rows.append(compact)
-    headers = ["Period", "Sess", "Total", "Output", "Activity"]
-    align_right = {1, 2, 3}
+    headers = ["Period", "Sess", "Total", "Output", "Energy", "Trees", "Activity"]
+    align_right = {1, 2, 3, 4, 5}
     if with_cost:
         headers.append("Est. Cost")
-        align_right.add(5)
+        align_right.add(7)
     panel_table = render_table(headers, compact_rows, align_right=align_right)
     return ui.panel(title, panel_table.splitlines(), color=color)
 
@@ -1519,11 +1625,11 @@ def render_daily_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool,
     lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
     rows = build_daily_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
     if rows:
-        headers = ["Day", "Sess", "Input", "Cached", "Output", "Total", "Cached%", "Activity"]
-        align_right = {1, 2, 3, 4, 5, 6}
+        headers = ["Day", "Sess", "Input", "Cached", "Output", "Total", "Energy", "Trees", "Cached%", "Activity"]
+        align_right = {1, 2, 3, 4, 5, 6, 7, 8}
         if with_cost:
             headers.append("Est. Cost")
-            align_right.add(8)
+            align_right.add(10)
         lines.append(ui.panel("Daily Report", render_table(headers, rows, align_right=align_right).splitlines(), color="green"))
     lines.append(build_notes_panel(report, ui, censored=censored))
     return "\n\n".join(lines)
@@ -1534,11 +1640,11 @@ def render_monthly_report(report: UsageReport, ui: TerminalUI, *, with_cost: boo
     lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
     rows = build_monthly_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
     if rows:
-        headers = ["Month", "Sess", "Input", "Cached", "Output", "Total", "Cached%", "Activity"]
-        align_right = {1, 2, 3, 4, 5, 6}
+        headers = ["Month", "Sess", "Input", "Cached", "Output", "Total", "Energy", "Trees", "Cached%", "Activity"]
+        align_right = {1, 2, 3, 4, 5, 6, 7, 8}
         if with_cost:
             headers.append("Est. Cost")
-            align_right.add(8)
+            align_right.add(10)
         lines.append(ui.panel("Monthly Report", render_table(headers, rows, align_right=align_right).splitlines(), color="yellow"))
     lines.append(build_notes_panel(report, ui, censored=censored))
     return "\n\n".join(lines)
@@ -1549,11 +1655,11 @@ def render_weekly_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool
     lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
     rows = build_weekly_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
     if rows:
-        headers = ["Week", "Sess", "Input", "Cached", "Output", "Total", "Cached%", "Activity"]
-        align_right = {1, 2, 3, 4, 5, 6}
+        headers = ["Week", "Sess", "Input", "Cached", "Output", "Total", "Energy", "Trees", "Cached%", "Activity"]
+        align_right = {1, 2, 3, 4, 5, 6, 7, 8}
         if with_cost:
             headers.append("Est. Cost")
-            align_right.add(8)
+            align_right.add(10)
         lines.append(ui.panel("Weekly Report", render_table(headers, rows, align_right=align_right).splitlines(), color="cyan"))
     lines.append(build_notes_panel(report, ui, censored=censored))
     return "\n\n".join(lines)
@@ -1582,22 +1688,35 @@ def build_json_report(report: UsageReport, *, censored: bool) -> dict:
         "root": None if censored else report.root,
         "generated_at": report.generated_at,
         "window": {"since": report.since, "until": report.until},
-        "summary": asdict(report.summary),
+        "summary": {**asdict(report.summary), "tree_offset_hours": report.summary.tree_offset_hours},
         "plan_types": report.plan_types,
         "limits": asdict(report.limits) if report.limits is not None else None,
         "diagnostics": asdict(report.diagnostics),
-        "daily": {key: asdict(value) for key, value in sorted(report.daily.items())},
+        "daily": {
+            key: {**asdict(value), "tree_offset_hours": value.tree_offset_hours}
+            for key, value in sorted(report.daily.items())
+        },
         "daily_session_counts": report.daily_session_counts,
-        "weekly": {key: asdict(value) for key, value in sorted(report.weekly.items())},
+        "weekly": {
+            key: {**asdict(value), "tree_offset_hours": value.tree_offset_hours}
+            for key, value in sorted(report.weekly.items())
+        },
         "weekly_session_counts": report.weekly_session_counts,
-        "monthly": {key: asdict(value) for key, value in sorted(report.monthly.items())},
+        "monthly": {
+            key: {**asdict(value), "tree_offset_hours": value.tree_offset_hours}
+            for key, value in sorted(report.monthly.items())
+        },
         "monthly_session_counts": report.monthly_session_counts,
-        "models": {key: asdict(value) for key, value in sorted(report.models.items())},
+        "models": {
+            key: {**asdict(value), "tree_offset_hours": value.tree_offset_hours}
+            for key, value in sorted(report.models.items())
+        },
         "sessions": {
             key: {
                 **asdict(value),
                 "title": None if censored else value.title,
                 "top_model": value.top_model,
+                "tree_offset_hours": value.tree_offset_hours,
             }
             for key, value in sorted(report.sessions.items())
         },
@@ -1617,7 +1736,7 @@ def build_focused_json_report(
         "root": None if censored else report.root,
         "generated_at": report.generated_at,
         "window": {"since": report.since, "until": report.until},
-        "summary": asdict(report.summary),
+        "summary": {**asdict(report.summary), "tree_offset_hours": report.summary.tree_offset_hours},
         "plan_types": report.plan_types,
         "limits": asdict(report.limits) if report.limits is not None else None,
         "diagnostics": asdict(report.diagnostics),
@@ -1634,6 +1753,8 @@ def build_focused_json_report(
                 "output_tokens": aggregate_row.output_tokens,
                 "total_tokens": aggregate_row.total_tokens,
                 "cached_ratio": aggregate_row.cached_ratio,
+                "estimated_energy_wh": aggregate_row.estimated_energy_wh,
+                "tree_offset_hours": aggregate_row.tree_offset_hours,
             }
             if with_cost:
                 item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
@@ -1652,6 +1773,8 @@ def build_focused_json_report(
                 "output_tokens": aggregate_row.output_tokens,
                 "total_tokens": aggregate_row.total_tokens,
                 "cached_ratio": aggregate_row.cached_ratio,
+                "estimated_energy_wh": aggregate_row.estimated_energy_wh,
+                "tree_offset_hours": aggregate_row.tree_offset_hours,
             }
             if with_cost:
                 item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
@@ -1670,6 +1793,8 @@ def build_focused_json_report(
                 "output_tokens": aggregate_row.output_tokens,
                 "total_tokens": aggregate_row.total_tokens,
                 "cached_ratio": aggregate_row.cached_ratio,
+                "estimated_energy_wh": aggregate_row.estimated_energy_wh,
+                "tree_offset_hours": aggregate_row.tree_offset_hours,
             }
             if with_cost:
                 item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
@@ -1691,6 +1816,8 @@ def build_focused_json_report(
                 "cached_ratio": session.cached_ratio,
                 "first_day": session.first_day,
                 "last_day": session.last_day,
+                "estimated_energy_wh": session.estimated_energy_wh,
+                "tree_offset_hours": session.tree_offset_hours,
             }
             if with_cost:
                 item["estimated_cost_usd"] = session.estimated_cost_usd if session.has_cost else None
