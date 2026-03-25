@@ -69,7 +69,7 @@ cuv --json | jq '.limits'
 
 ## Notes
 
-- Prefer the dashboard for human-facing answers.
+- Prefer the dashboard for human-facing answers. It includes compact daily, weekly, and monthly trend panels by default.
 - Prefer `--json` for post-processing or scripted summaries.
 - Treat cost as heuristic only, not billing truth.
 - Treat limit progress as experimental best-effort local metadata from `logs_1.sqlite`.

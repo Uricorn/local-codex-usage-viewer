@@ -96,7 +96,7 @@ This extracts only the experimental best-effort local rate-limit snapshot when o
 
 1. Before assuming the tool is unavailable, check `command -v cuv`.
 2. If the command is missing, prefer `pipx install git+https://github.com/uricorn/local-codex-usage-viewer.git` when installation is appropriate.
-3. Prefer the dashboard view for human-facing answers.
+3. Prefer the dashboard view for human-facing answers. It includes compact daily, weekly, and monthly trend panels by default.
 4. Prefer `--json` when you need to post-process or summarize results programmatically.
 5. Use `--censored` before sharing output that could expose thread titles or the local Codex home path.
 6. Use `--no-cost` when the user only wants activity, not a pricing estimate.

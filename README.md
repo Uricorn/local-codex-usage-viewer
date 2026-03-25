@@ -96,7 +96,7 @@ python3 codex_usage.py
 cuv
 ```
 
-Scans the default Codex home directory and renders the terminal dashboard. When local limit snapshots are available in `logs_1.sqlite`, the dashboard also shows a `Limit Progress (Experimental)` panel.
+Scans the default Codex home directory and renders the terminal dashboard with compact daily, weekly, and monthly trend panels. When local limit snapshots are available in `logs_1.sqlite`, the dashboard also shows a `Limit Progress (Experimental)` panel.
 
 ```bash
 cuv --help

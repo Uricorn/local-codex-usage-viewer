@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 COMMANDS = ("dashboard", "daily", "weekly", "monthly", "sessions")
 
 COMMAND_HELP = {
@@ -1412,6 +1412,31 @@ def build_overview_panels(report: UsageReport, ui: TerminalUI, *, with_cost: boo
     return panels
 
 
+def build_compact_period_panel(
+    title: str,
+    color: str,
+    rows: list[list[str]],
+    ui: TerminalUI,
+    *,
+    with_cost: bool,
+) -> str | None:
+    if not rows:
+        return None
+    compact_rows = []
+    for row in rows:
+        compact = [row[0], row[1], row[5], row[4], row[7]]
+        if with_cost:
+            compact.append(row[8])
+        compact_rows.append(compact)
+    headers = ["Period", "Sess", "Total", "Output", "Activity"]
+    align_right = {1, 2, 3}
+    if with_cost:
+        headers.append("Est. Cost")
+        align_right.add(5)
+    panel_table = render_table(headers, compact_rows, align_right=align_right)
+    return ui.panel(title, panel_table.splitlines(), color=color)
+
+
 def build_dashboard(
     report: UsageReport,
     ui: TerminalUI,
@@ -1423,21 +1448,38 @@ def build_dashboard(
 ) -> str:
     unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
     lines: list[str] = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
+    weekly_limit = max(1, min(limit, 8))
+    monthly_limit = max(1, min(limit, 6))
 
-    daily_rows = []
-    for row in build_daily_rows(report, with_cost=with_cost, limit=daily_limit, unicode_ok=unicode_ok):
-        compact = [row[0], row[1], row[5], row[4], row[7]]
-        if with_cost:
-            compact.append(row[8])
-        daily_rows.append(compact)
-    if daily_rows:
-        headers = ["Day", "Sess", "Total", "Output", "Activity"]
-        align_right = {1, 2, 3}
-        if with_cost:
-            headers.append("Est. Cost")
-            align_right.add(5)
-        daily_table = render_table(headers, daily_rows, align_right=align_right)
-        lines.append(ui.panel("Daily", daily_table.splitlines(), color="green"))
+    daily_panel = build_compact_period_panel(
+        "Daily",
+        "green",
+        build_daily_rows(report, with_cost=with_cost, limit=daily_limit, unicode_ok=unicode_ok),
+        ui,
+        with_cost=with_cost,
+    )
+    if daily_panel is not None:
+        lines.append(daily_panel)
+
+    weekly_panel = build_compact_period_panel(
+        "Weekly",
+        "cyan",
+        build_weekly_rows(report, with_cost=with_cost, limit=weekly_limit, unicode_ok=unicode_ok),
+        ui,
+        with_cost=with_cost,
+    )
+    if weekly_panel is not None:
+        lines.append(weekly_panel)
+
+    monthly_panel = build_compact_period_panel(
+        "Monthly",
+        "yellow",
+        build_monthly_rows(report, with_cost=with_cost, limit=monthly_limit, unicode_ok=unicode_ok),
+        ui,
+        with_cost=with_cost,
+    )
+    if monthly_panel is not None:
+        lines.append(monthly_panel)
 
     model_rows = build_model_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
     if model_rows:
