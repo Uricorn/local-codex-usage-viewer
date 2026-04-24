@@ -82,6 +82,7 @@ PRICING = {
     "gpt-5.2": (1.75e-6, 1.4e-5, 1.75e-7),
     "gpt-5.2-codex": (1.75e-6, 1.4e-5, 1.75e-7),
     "gpt-5.2-pro": (2.1e-5, 1.68e-4, None),
+    "gpt-5.3-chat-latest": (1.75e-6, 1.4e-5, 1.75e-7),
     "gpt-5.3-codex": (1.75e-6, 1.4e-5, 1.75e-7),
     "gpt-5.3-codex-spark": (0.0, 0.0, 0.0),
     "gpt-5.3-codex-spark-preview": (0.0, 0.0, 0.0),
@@ -89,6 +90,8 @@ PRICING = {
     "gpt-5.4-mini": (7.5e-7, 4.5e-6, 7.5e-8),
     "gpt-5.4-nano": (2e-7, 1.25e-6, 2e-8),
     "gpt-5.4-pro": (3e-5, 1.8e-4, None),
+    "gpt-5.5": (5e-6, 3e-5, 5e-7),
+    "gpt-5.5-pro": (3e-5, 1.8e-4, None),
 }
 
 # Energy heuristic rates are intentionally rough. They provide a consistent
@@ -107,6 +110,7 @@ MODEL_ENERGY_MULTIPLIER = {
     "gpt-5.2": 1.05,
     "gpt-5.2-codex": 1.05,
     "gpt-5.2-pro": 1.65,
+    "gpt-5.3-chat-latest": 1.05,
     "gpt-5.3-codex": 1.05,
     "gpt-5.3-codex-spark": 0.2,
     "gpt-5.3-codex-spark-preview": 0.2,
@@ -114,11 +118,15 @@ MODEL_ENERGY_MULTIPLIER = {
     "gpt-5.4-mini": 0.4,
     "gpt-5.4-nano": 0.15,
     "gpt-5.4-pro": 1.75,
+    "gpt-5.5": 1.15,
+    "gpt-5.5-pro": 1.8,
 }
 DEFAULT_GRID_INTENSITY_G_CO2E_PER_KWH = 400.0
 TREE_ABSORPTION_G_CO2E_PER_YEAR = 22_000.0
 
 MODEL_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+MODEL_REASONING_SUFFIX = re.compile(r"-(low|medium|high|xhigh)$")
+GPT_VERSION_RE = re.compile(r"^gpt-(\d+(?:\.\d+)?)(.*)$")
 SESSION_ID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
     re.IGNORECASE,
@@ -139,6 +147,7 @@ class UsageEvent:
     plan_type: str | None
     estimated_energy_wh: float
     estimated_cost_usd: float | None
+    estimated_cost_is_guess: bool = False
 
     @property
     def total_tokens(self) -> int:
@@ -154,6 +163,7 @@ class Aggregate:
     estimated_energy_wh: float = 0.0
     estimated_cost_usd: float = 0.0
     has_cost: bool = False
+    has_guessed_cost: bool = False
 
     @property
     def total_tokens(self) -> int:
@@ -185,6 +195,8 @@ class Aggregate:
         if event.estimated_cost_usd is not None:
             self.estimated_cost_usd += event.estimated_cost_usd
             self.has_cost = True
+            if event.estimated_cost_is_guess:
+                self.has_guessed_cost = True
 
 
 @dataclass
@@ -743,6 +755,68 @@ def parse_limit_window(payload: object) -> LimitWindow | None:
     return None
 
 
+def strip_model_suffixes(model: str) -> str:
+    stripped = MODEL_DATE_SUFFIX.sub("", model)
+    return MODEL_REASONING_SUFFIX.sub("", stripped)
+
+
+def pricing_variant(model: str) -> str:
+    match = GPT_VERSION_RE.match(model)
+    suffix = match.group(2) if match else model
+    if "spark" in suffix:
+        return "spark"
+    if suffix.endswith("-pro"):
+        return "pro"
+    if suffix.endswith("-nano"):
+        return "nano"
+    if suffix.endswith("-mini"):
+        return "mini"
+    if "-codex" in suffix:
+        return "codex"
+    return "base"
+
+
+def pricing_version_key(model: str) -> tuple[int, ...]:
+    match = GPT_VERSION_RE.match(model)
+    if not match:
+        return ()
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def pricing_major_version(model: str) -> int | None:
+    key = pricing_version_key(model)
+    return key[0] if key else None
+
+
+def guess_pricing(model: str) -> tuple[float, float, float | None] | None:
+    match = GPT_VERSION_RE.match(model)
+    if not match:
+        return None
+    if match.group(2) and not match.group(2).startswith("-"):
+        return None
+
+    variant = pricing_variant(model)
+    major_version = pricing_major_version(model)
+    base_model = re.sub(r"-(codex|max|mini|nano|pro|spark|preview).*$", "", model)
+    if variant == "codex" and base_model in PRICING:
+        return PRICING[base_model]
+
+    if variant == "spark":
+        return PRICING.get("gpt-5.3-codex-spark-preview")
+
+    candidate_variants = {"base"} if variant == "codex" else {variant}
+    candidates = [
+        (key, pricing)
+        for key, pricing in PRICING.items()
+        if pricing_major_version(key) == major_version
+        and pricing_variant(key) in candidate_variants
+        and not all(rate == 0.0 for rate in pricing if rate is not None)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: pricing_version_key(item[0]))[1]
+
+
 def normalize_model(raw: str | None) -> str:
     if not raw:
         return "unknown"
@@ -751,19 +825,44 @@ def normalize_model(raw: str | None) -> str:
         model = model.removeprefix("openai/")
     if model in PRICING:
         return model
-    stripped = MODEL_DATE_SUFFIX.sub("", model)
-    return stripped if stripped in PRICING else model
+    stripped = strip_model_suffixes(model)
+    if stripped in PRICING or guess_pricing(stripped) is not None:
+        return stripped
+    return model
 
 
-def estimate_cost(model: str, input_tokens: int, cached_input_tokens: int, output_tokens: int) -> float | None:
-    pricing = PRICING.get(normalize_model(model))
-    if pricing is None:
+def resolve_pricing(model: str) -> tuple[tuple[float, float, float | None], bool] | None:
+    normalized = normalize_model(model)
+    pricing = PRICING.get(normalized)
+    if pricing is not None:
+        return pricing, False
+    guessed = guess_pricing(strip_model_suffixes(normalized))
+    if guessed is None:
         return None
+    return guessed, True
+
+
+def estimate_cost_details(
+    model: str,
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+) -> tuple[float, bool] | None:
+    resolved = resolve_pricing(model)
+    if resolved is None:
+        return None
+    pricing, is_guess = resolved
     input_rate, output_rate, cached_rate = pricing
     cached = max(0, min(cached_input_tokens, input_tokens))
     non_cached = max(0, input_tokens - cached)
     cache_read_rate = cached_rate if cached_rate is not None else input_rate
-    return non_cached * input_rate + cached * cache_read_rate + output_tokens * output_rate
+    cost = non_cached * input_rate + cached * cache_read_rate + output_tokens * output_rate
+    return cost, is_guess
+
+
+def estimate_cost(model: str, input_tokens: int, cached_input_tokens: int, output_tokens: int) -> float | None:
+    estimated = estimate_cost_details(model, input_tokens, cached_input_tokens, output_tokens)
+    return None if estimated is None else estimated[0]
 
 
 def estimate_energy(model: str, input_tokens: int, cached_input_tokens: int, output_tokens: int) -> float:
@@ -891,7 +990,8 @@ def parse_session_file(
             session_title = (session_index.get(effective_session_id) or {}).get("thread_name")
             normalized_model = normalize_model(model)
             estimated_energy = estimate_energy(normalized_model, input_delta, cached_delta, output_delta)
-            estimated = None if not with_cost else estimate_cost(normalized_model, input_delta, cached_delta, output_delta)
+            cost_details = None if not with_cost else estimate_cost_details(normalized_model, input_delta, cached_delta, output_delta)
+            estimated = None if cost_details is None else cost_details[0]
             events.append(
                 UsageEvent(
                     session_id=effective_session_id,
@@ -905,6 +1005,7 @@ def parse_session_file(
                     plan_type=plan_type,
                     estimated_energy_wh=estimated_energy,
                     estimated_cost_usd=estimated,
+                    estimated_cost_is_guess=False if cost_details is None else cost_details[1],
                 )
             )
 
@@ -1062,10 +1163,11 @@ def format_compact_int(value: int) -> str:
     return str(value)
 
 
-def format_cost(value: float | None) -> str:
+def format_cost(value: float | None, *, guessed: bool = False) -> str:
     if value is None:
         return "-"
-    return f"${value:,.2f}"
+    formatted = f"${value:,.2f}"
+    return f"~{formatted}" if guessed else formatted
 
 
 def format_energy(value: float) -> str:
@@ -1345,7 +1447,12 @@ def build_daily_rows(report: UsageReport, *, with_cost: bool, limit: int, unicod
             metric_bar(aggregate_row.total_tokens, max_daily_total, unicode_ok=unicode_ok),
         ]
         if with_cost:
-            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+            row.append(
+                format_cost(
+                    aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None,
+                    guessed=aggregate_row.has_guessed_cost,
+                )
+            )
         rows.append(row)
     return rows
 
@@ -1367,7 +1474,12 @@ def build_monthly_rows(report: UsageReport, *, with_cost: bool, limit: int, unic
             metric_bar(aggregate_row.total_tokens, max_monthly_total, unicode_ok=unicode_ok),
         ]
         if with_cost:
-            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+            row.append(
+                format_cost(
+                    aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None,
+                    guessed=aggregate_row.has_guessed_cost,
+                )
+            )
         rows.append(row)
     return rows
 
@@ -1389,7 +1501,12 @@ def build_weekly_rows(report: UsageReport, *, with_cost: bool, limit: int, unico
             metric_bar(aggregate_row.total_tokens, max_weekly_total, unicode_ok=unicode_ok),
         ]
         if with_cost:
-            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+            row.append(
+                format_cost(
+                    aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None,
+                    guessed=aggregate_row.has_guessed_cost,
+                )
+            )
         rows.append(row)
     return rows
 
@@ -1411,7 +1528,12 @@ def build_model_rows(report: UsageReport, *, with_cost: bool, limit: int, unicod
             metric_bar(aggregate_row.total_tokens, max_model_total, unicode_ok=unicode_ok),
         ]
         if with_cost:
-            row.append(format_cost(aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None))
+            row.append(
+                format_cost(
+                    aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None,
+                    guessed=aggregate_row.has_guessed_cost,
+                )
+            )
         rows.append(row)
     return rows
 
@@ -1438,7 +1560,12 @@ def build_session_rows(
             metric_bar(session.total_tokens, max_session_total, unicode_ok=unicode_ok),
         ]
         if with_cost:
-            row.append(format_cost(session.estimated_cost_usd if session.has_cost else None))
+            row.append(
+                format_cost(
+                    session.estimated_cost_usd if session.has_cost else None,
+                    guessed=session.has_guessed_cost,
+                )
+            )
         if not censored:
             row.append(shorten_middle(session.title or session.session_id, 40))
         rows.append(row)
@@ -1463,8 +1590,12 @@ def build_cards(report: UsageReport, with_cost: bool) -> list[tuple[str, str, st
         ("Tree Offset", format_tree_offset(report.summary.tree_offset_hours), "one tree absorbing CO2", "green"),
     ]
     if with_cost:
-        cost_value = format_cost(report.summary.estimated_cost_usd if report.summary.has_cost else None)
-        cards.append(("Est. Cost", cost_value, "heuristic only", "magenta"))
+        cost_value = format_cost(
+            report.summary.estimated_cost_usd if report.summary.has_cost else None,
+            guessed=report.summary.has_guessed_cost,
+        )
+        subtitle = "includes guessed rates" if report.summary.has_guessed_cost else "heuristic only"
+        cards.append(("Est. Cost", cost_value, subtitle, "magenta"))
     else:
         cards.append(("Output Tokens", format_compact_int(report.summary.output_tokens), "non-cached output", "magenta"))
     return cards
@@ -1505,6 +1636,10 @@ def build_notes_panel(report: UsageReport, ui: TerminalUI, *, censored: bool) ->
         ),
         "Estimated cost uses a local heuristic. Treat it as relative guidance, not billing truth.",
     ]
+    if report.summary.has_guessed_cost:
+        footer_lines.append(
+            "Costs prefixed with ~ include fallback prices guessed from the nearest known model family."
+        )
     return ui.panel("Notes", footer_lines, color="gray")
 
 
@@ -1758,6 +1893,7 @@ def build_focused_json_report(
             }
             if with_cost:
                 item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
+                item["has_guessed_cost"] = aggregate_row.has_guessed_cost
             rows.append(item)
         payload["rows"] = rows
         return payload
@@ -1778,6 +1914,7 @@ def build_focused_json_report(
             }
             if with_cost:
                 item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
+                item["has_guessed_cost"] = aggregate_row.has_guessed_cost
             rows.append(item)
         payload["rows"] = rows
         return payload
@@ -1798,6 +1935,7 @@ def build_focused_json_report(
             }
             if with_cost:
                 item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
+                item["has_guessed_cost"] = aggregate_row.has_guessed_cost
             rows.append(item)
         payload["rows"] = rows
         return payload
@@ -1821,6 +1959,7 @@ def build_focused_json_report(
             }
             if with_cost:
                 item["estimated_cost_usd"] = session.estimated_cost_usd if session.has_cost else None
+                item["has_guessed_cost"] = session.has_guessed_cost
             rows.append(item)
         payload["rows"] = rows
         return payload
