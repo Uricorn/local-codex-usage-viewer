@@ -186,11 +186,29 @@ Scans a different Codex home directory instead of the default `~/.codex` or `$CO
 ## Output Notes
 
 - Estimated cost is heuristic-only.
+- Cost values prefixed with `~` include fallback prices guessed from the nearest known model family.
 - Estimated energy and tree offset are heuristic-only.
 - Limit progress is experimental, best-effort, and comes from local `codex.rate_limits` websocket events in `logs_1.sqlite`.
 - Limit progress may be missing if the local logs do not contain a recent rate-limit snapshot.
 - The dashboard is useful for observability and rough comparisons, not billing reconciliation.
 - `--censored` removes thread titles and hides the local source path from terminal and JSON output.
+
+### Cost Heuristic Footnote
+
+The cost estimate uses local token counts and the model prices in `PRICING` inside `codex_usage.py`.
+Each tuple is:
+
+```text
+(input_token_rate, output_token_rate, cached_input_token_rate)
+```
+
+Rates are stored per token. To add a new official model price, divide the published per-1M token price by `1_000_000` and add the normalized model name:
+
+```python
+PRICING["gpt-example"] = (2.5e-6, 1.5e-5, 2.5e-7)
+```
+
+Use `None` for `cached_input_token_rate` when cached input has no separate published price. If a future GPT model is missing from the table, `cuv` falls back to the nearest known GPT model family and marks the displayed cost with `~`; JSON output also includes `has_guessed_cost`.
 
 ### Energy Heuristic Footnote
 

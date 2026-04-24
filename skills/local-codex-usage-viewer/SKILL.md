@@ -100,7 +100,7 @@ This extracts only the experimental best-effort local rate-limit snapshot when o
 4. Prefer `--json` when you need to post-process or summarize results programmatically.
 5. Use `--censored` before sharing output that could expose thread titles or the local Codex home path.
 6. Use `--no-cost` when the user only wants activity, not a pricing estimate.
-7. Treat cost as heuristic only. Do not present it as billing truth.
+7. Treat cost as heuristic only. Do not present it as billing truth. Costs prefixed with `~` use fallback prices guessed from the nearest known model family.
 8. Treat limit progress as experimental best-effort local metadata from `logs_1.sqlite`, not a guarantee of server-side billing state.
 9. `--censored` does not hide limit progress because that section does not include thread titles or the local source path.
 10. Prefer `daily`, `weekly`, `monthly`, or `sessions` when the user wants a focused report instead of the dashboard.
