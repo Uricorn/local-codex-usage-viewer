@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 COMMANDS = ("dashboard", "daily", "weekly", "monthly", "sessions")
 
 COMMAND_HELP = {
@@ -484,6 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--version",
+        "-v",
         action="version",
         version=f"%(prog)s {VERSION}",
     )

@@ -72,6 +72,18 @@ pipx ensurepath
 
 Then open a new terminal, or run `hash -r` in your current shell.
 
+To upgrade an existing install to the latest GitHub version:
+
+```bash
+pipx install --force git+https://github.com/uricorn/local-codex-usage-viewer.git
+```
+
+Then verify:
+
+```bash
+cuv --version
+```
+
 ### Fallback: `pip`
 
 Installs into the current Python environment.
