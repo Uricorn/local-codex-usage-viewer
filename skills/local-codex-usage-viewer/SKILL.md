@@ -74,12 +74,13 @@ Useful options:
 - `--since 2026-03-01 --until 2026-03-22` for an explicit date range.
 - `--all` to scan all locally available history.
 - `--watch 5` for a live-refresh dashboard.
+- `--limit N` to cap report rows intentionally.
 - `--json` for machine-readable output.
 - `--no-cost` to hide heuristic cost estimates.
 - `--plain` to disable ANSI colors when plain terminal output is preferred.
 - `--censored` to hide thread titles and the local source path.
 - `--root /path/to/codex-home` to scan a different Codex home directory.
-- `daily` for day-by-day usage rows.
+- `daily` for day-by-day usage rows, including zero-usage days in the selected date window.
 - `weekly` for week-by-week usage rows.
 - `monthly` for month-by-month usage rows.
 - `sessions` for detailed top-session output.

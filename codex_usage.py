@@ -22,8 +22,9 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 COMMANDS = ("dashboard", "daily", "weekly", "monthly", "sessions")
+DEFAULT_LIMIT = 10
 
 COMMAND_HELP = {
     "dashboard": {
@@ -447,8 +448,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--limit",
         type=int,
-        default=10,
-        help="Rows to show in model and session sections.",
+        default=None,
+        help="Rows to show. Defaults to all rows for period reports and 10 rows for dashboard/session sections.",
     )
     parser.add_argument(
         "--daily-limit",
@@ -538,6 +539,7 @@ def print_command_help(parser: argparse.ArgumentParser, topic: str | None) -> No
             "  --since YYYY-MM-DD         Inclusive start date",
             "  --until YYYY-MM-DD         Inclusive end date",
             "  --all                      Include all local history",
+            "  --limit N                  Cap report rows",
             "  --json                     Emit machine-readable JSON",
             "  --censored                 Hide thread titles and local path",
             "  --no-cost                  Hide heuristic cost estimates",
@@ -1342,6 +1344,47 @@ def percent_bar(value: float | None, width: int = 14, unicode_ok: bool = True) -
     return full * filled + empty * (width - filled)
 
 
+def parse_day_key(day_text: str) -> date | None:
+    try:
+        return date.fromisoformat(day_text)
+    except ValueError:
+        return None
+
+
+def daily_bounds(report: UsageReport) -> tuple[date, date] | None:
+    parsed_since = parse_day_key(report.since) if report.since else None
+    parsed_until = parse_day_key(report.until) if report.until else None
+    parsed_days = [parsed for day in report.daily for parsed in [parse_day_key(day)] if parsed is not None]
+
+    if parsed_since is not None and parsed_until is not None:
+        start, end = parsed_since, parsed_until
+    elif parsed_days:
+        start, end = min(parsed_days), max(parsed_days)
+    else:
+        return None
+
+    if end < start:
+        return None
+    return start, end
+
+
+def iter_daily_keys(report: UsageReport, *, reverse: bool) -> list[str]:
+    bounds = daily_bounds(report)
+    if bounds is None:
+        return sorted(report.daily.keys(), reverse=reverse)
+
+    start, end = bounds
+    days = (end - start).days + 1
+    keys = [(start + timedelta(days=offset)).isoformat() for offset in range(days)]
+    if reverse:
+        keys.reverse()
+    return keys
+
+
+def limited_rows(items: list[str], limit: int | None) -> list[str]:
+    return items if limit is None else items[:limit]
+
+
 def render_table(headers: list[str], rows: list[list[str]], align_right: set[int] | None = None) -> str:
     if align_right is None:
         align_right = set()
@@ -1431,10 +1474,11 @@ def sorted_sessions(report: UsageReport, *, with_cost: bool, limit: int | None =
     return rows if limit is None else rows[:limit]
 
 
-def build_daily_rows(report: UsageReport, *, with_cost: bool, limit: int, unicode_ok: bool) -> list[list[str]]:
+def build_daily_rows(report: UsageReport, *, with_cost: bool, limit: int | None, unicode_ok: bool) -> list[list[str]]:
     rows: list[list[str]] = []
     max_daily_total = max((aggregate.total_tokens for aggregate in report.daily.values()), default=0)
-    for day_key, aggregate_row in sorted(report.daily.items(), reverse=True)[:limit]:
+    for day_key in limited_rows(iter_daily_keys(report, reverse=True), limit):
+        aggregate_row = report.daily.get(day_key, Aggregate())
         row = [
             format_pretty_day(day_key),
             str(report.daily_session_counts.get(day_key, 0)),
@@ -1448,20 +1492,24 @@ def build_daily_rows(report: UsageReport, *, with_cost: bool, limit: int, unicod
             metric_bar(aggregate_row.total_tokens, max_daily_total, unicode_ok=unicode_ok),
         ]
         if with_cost:
-            row.append(
-                format_cost(
-                    aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None,
-                    guessed=aggregate_row.has_guessed_cost,
+            if aggregate_row.total_tokens == 0:
+                row.append(format_cost(0.0))
+            else:
+                row.append(
+                    format_cost(
+                        aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None,
+                        guessed=aggregate_row.has_guessed_cost,
+                    )
                 )
-            )
         rows.append(row)
     return rows
 
 
-def build_monthly_rows(report: UsageReport, *, with_cost: bool, limit: int, unicode_ok: bool) -> list[list[str]]:
+def build_monthly_rows(report: UsageReport, *, with_cost: bool, limit: int | None, unicode_ok: bool) -> list[list[str]]:
     rows: list[list[str]] = []
     max_monthly_total = max((aggregate.total_tokens for aggregate in report.monthly.values()), default=0)
-    for month_key, aggregate_row in sorted(report.monthly.items(), reverse=True)[:limit]:
+    selected = sorted(report.monthly.items(), reverse=True)
+    for month_key, aggregate_row in (selected if limit is None else selected[:limit]):
         row = [
             format_pretty_month(month_key),
             str(report.monthly_session_counts.get(month_key, 0)),
@@ -1485,10 +1533,11 @@ def build_monthly_rows(report: UsageReport, *, with_cost: bool, limit: int, unic
     return rows
 
 
-def build_weekly_rows(report: UsageReport, *, with_cost: bool, limit: int, unicode_ok: bool) -> list[list[str]]:
+def build_weekly_rows(report: UsageReport, *, with_cost: bool, limit: int | None, unicode_ok: bool) -> list[list[str]]:
     rows: list[list[str]] = []
     max_weekly_total = max((aggregate.total_tokens for aggregate in report.weekly.values()), default=0)
-    for week_key, aggregate_row in sorted(report.weekly.items(), reverse=True)[:limit]:
+    selected = sorted(report.weekly.items(), reverse=True)
+    for week_key, aggregate_row in (selected if limit is None else selected[:limit]):
         row = [
             format_pretty_week(week_key),
             str(report.weekly_session_counts.get(week_key, 0)),
@@ -1756,7 +1805,7 @@ def build_dashboard(
     return "\n\n".join(lines)
 
 
-def render_daily_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int, censored: bool) -> str:
+def render_daily_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int | None, censored: bool) -> str:
     unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
     lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
     rows = build_daily_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
@@ -1771,7 +1820,7 @@ def render_daily_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool,
     return "\n\n".join(lines)
 
 
-def render_monthly_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int, censored: bool) -> str:
+def render_monthly_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int | None, censored: bool) -> str:
     unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
     lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
     rows = build_monthly_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
@@ -1786,7 +1835,7 @@ def render_monthly_report(report: UsageReport, ui: TerminalUI, *, with_cost: boo
     return "\n\n".join(lines)
 
 
-def render_weekly_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int, censored: bool) -> str:
+def render_weekly_report(report: UsageReport, ui: TerminalUI, *, with_cost: bool, limit: int | None, censored: bool) -> str:
     unicode_ok = not ui.enabled or os.environ.get("TERM", "") != "dumb"
     lines = build_overview_panels(report, ui, with_cost=with_cost, censored=censored)
     rows = build_weekly_rows(report, with_cost=with_cost, limit=limit, unicode_ok=unicode_ok)
@@ -1864,7 +1913,7 @@ def build_focused_json_report(
     *,
     command: str,
     with_cost: bool,
-    limit: int,
+    limit: int | None,
     censored: bool,
 ) -> dict:
     payload = {
@@ -1879,7 +1928,8 @@ def build_focused_json_report(
     }
     if command == "daily":
         rows = []
-        for day_key, aggregate_row in sorted(report.daily.items(), reverse=True)[:limit]:
+        for day_key in limited_rows(iter_daily_keys(report, reverse=True), limit):
+            aggregate_row = report.daily.get(day_key, Aggregate())
             item = {
                 "day": day_key,
                 "label": format_pretty_day(day_key),
@@ -1893,14 +1943,19 @@ def build_focused_json_report(
                 "tree_offset_hours": aggregate_row.tree_offset_hours,
             }
             if with_cost:
-                item["estimated_cost_usd"] = aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
+                item["estimated_cost_usd"] = (
+                    0.0
+                    if aggregate_row.total_tokens == 0
+                    else aggregate_row.estimated_cost_usd if aggregate_row.has_cost else None
+                )
                 item["has_guessed_cost"] = aggregate_row.has_guessed_cost
             rows.append(item)
         payload["rows"] = rows
         return payload
     if command == "weekly":
         rows = []
-        for week_key, aggregate_row in sorted(report.weekly.items(), reverse=True)[:limit]:
+        selected = sorted(report.weekly.items(), reverse=True)
+        for week_key, aggregate_row in (selected if limit is None else selected[:limit]):
             item = {
                 "week_start": week_key,
                 "label": format_pretty_week(week_key),
@@ -1921,7 +1976,8 @@ def build_focused_json_report(
         return payload
     if command == "monthly":
         rows = []
-        for month_key, aggregate_row in sorted(report.monthly.items(), reverse=True)[:limit]:
+        selected = sorted(report.monthly.items(), reverse=True)
+        for month_key, aggregate_row in (selected if limit is None else selected[:limit]):
             item = {
                 "month": month_key,
                 "label": format_pretty_month(month_key),
@@ -1942,7 +1998,11 @@ def build_focused_json_report(
         return payload
     if command == "sessions":
         rows = []
-        for session in sorted_sessions(report, with_cost=with_cost, limit=limit):
+        for session in sorted_sessions(
+            report,
+            with_cost=with_cost,
+            limit=limit if limit is not None else DEFAULT_LIMIT,
+        ):
             item = {
                 "session_id": session.session_id,
                 "title": None if censored else session.title,
@@ -2036,14 +2096,14 @@ def render_plain_or_json(report: UsageReport, args: argparse.Namespace, ui: Term
             report,
             ui=ui,
             with_cost=not args.no_cost,
-            limit=args.limit,
+            limit=args.limit if args.limit is not None else DEFAULT_LIMIT,
             censored=args.censored,
         )
 
     return build_dashboard(
         report,
         ui=ui,
-        limit=args.limit,
+        limit=args.limit if args.limit is not None else DEFAULT_LIMIT,
         daily_limit=args.daily_limit,
         with_cost=not args.no_cost,
         censored=args.censored,

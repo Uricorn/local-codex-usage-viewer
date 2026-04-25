@@ -121,7 +121,7 @@ Shows general CLI help or focused help for a specific report command.
 cuv daily --days 7
 ```
 
-Shows a day-by-day table with sessions, tokens, cached ratio, and optional estimated cost. The dashboard summary cards also include estimated energy and a friendly tree-offset equivalent.
+Shows a day-by-day table with sessions, tokens, cached ratio, and optional estimated cost. Daily reports include every date in the selected window, including zero-usage days; use `--limit N` to cap the rows intentionally. The dashboard summary cards also include estimated energy and a friendly tree-offset equivalent.
 
 ```bash
 cuv weekly --days 90
